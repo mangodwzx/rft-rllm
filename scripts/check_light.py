@@ -1,4 +1,4 @@
-"""One lightweight check: parse sources/configs and smoke-check metrics; no GPU imports."""
+"""Parse sources/configs and run CPU regression tests; no model/GPU imports."""
 import ast
 import contextlib
 import io
@@ -6,12 +6,13 @@ import json
 import sys
 import tempfile
 import tomllib
+import unittest
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / "src"))
 checked = []
-for path in sorted((root / "src").rglob("*.py")) + sorted((root / "scripts").glob("*.py")):
+for path in sorted((root / "src").rglob("*.py")) + sorted((root / "scripts").glob("*.py")) + sorted((root / "tests").glob("*.py")):
     compile(ast.parse(path.read_text(encoding="utf-8-sig")), str(path), "exec")
     checked.append(str(path.relative_to(root)))
 tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
@@ -46,5 +47,10 @@ with tempfile.TemporaryDirectory(prefix="rft-rllm-check-") as temporary:
         pass
     else:
         raise AssertionError("Incomplete evaluation was accepted")
-print(json.dumps({"status": "passed", "files": checked, "checks": ["AST", "TOML/JSON", "three CLI plans", "tiny pass@k/incomplete-grid smoke"],
+suite = unittest.defaultTestLoader.discover(str(root / "tests"))
+result = unittest.TextTestRunner(stream=sys.stderr, verbosity=1).run(suite)
+if not result.wasSuccessful():
+    raise SystemExit(1)
+print(json.dumps({"status": "passed", "files": checked, "tests_run": result.testsRun, "tests_skipped": len(result.skipped),
+                  "checks": ["AST", "TOML/JSON", "all preset CLI plans", "pass@k/incomplete-grid smoke", "CPU regression suite"],
                   "not_run": ["GPU dependencies", "model/data downloads", "inference", "training"]}, ensure_ascii=False, indent=2))

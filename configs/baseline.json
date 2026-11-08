@@ -1,24 +1,27 @@
 {
-  "experiment": {"name": "qwen3_1p7b_pilot"},
-  "model": {"repo_id": "Qwen/Qwen3-1.7B", "revision": "main", "local_path": null},
+  "experiment": {"name": "qwen3_1p7b_base_pilot"},
+  "model": {"key": "qwen3_1p7b_base", "kind": "base", "repo_id": "Qwen/Qwen3-1.7B-Base", "revision": "main", "local_path": null},
   "data": {
+    "name": "math",
+    "kind": "math",
     "source": "EleutherAI/hendrycks_math",
     "source_revision": "main",
     "test_source": "HuggingFaceH4/MATH-500",
     "test_revision": "main",
     "train_size": 2048,
+    "pilot_size": 2048,
     "dev_size": 256,
     "seed": 42,
-    "registry_name": "rft_math_pilot"
+    "registry_name": "rft_math"
   },
-  "sampling": {"temperature": 1.0, "top_p": 1.0, "max_tokens": 4096, "max_prompt_length": 2048},
+  "sampling": {"temperature": 1.0, "top_p": 1.0, "max_tokens": 4096, "max_prompt_length": 4096},
   "resources": {"gpus": 1, "tensor_parallel_size": 1, "gpu_memory_utilization": 0.6},
   "server": {"host": "127.0.0.1", "port": 8010, "startup_timeout": 600, "seed": 42},
   "rft": {
     "rounds": 1,
     "attempts": 8,
-    "sft": {"epochs": 1, "lr": 0.000001, "batch_size": 32, "max_length": 8192, "lora_rank": 0}
+    "sft": {"epochs": 1, "lr": 0.000001, "batch_size": 32, "max_length": 8193, "lora_rank": 0}
   },
   "grpo": {"batch_size": 32, "group_size": 8, "epochs": 1, "lr": 0.000001, "seed": 42, "overrides": []},
-  "evaluation": {"attempts": 64, "ks": [1, 2, 4, 8, 16, 32, 64], "concurrency": 32}
+  "evaluation": {"attempts": 256, "ks": [1, 2, 4, 8, 16, 32, 64, 128, 256], "concurrency": 32}
 }

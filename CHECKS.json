@@ -1,32 +1,125 @@
 {
   "status": "passed",
   "files": [
-    "src\\rft_rllm\\__init__.py",
-    "src\\rft_rllm\\__main__.py",
-    "src\\rft_rllm\\budget.py",
-    "src\\rft_rllm\\cli.py",
-    "src\\rft_rllm\\config.py",
-    "src\\rft_rllm\\data.py",
-    "src\\rft_rllm\\flow.py",
-    "src\\rft_rllm\\metrics.py",
-    "src\\rft_rllm\\pipeline.py",
-    "src\\rft_rllm\\runtime.py",
-    "src\\rft_rllm\\train_grpo.py",
-    "scripts\\check_light.py",
-    "configs\\baseline.json",
-    "configs\\formal.json",
-    "configs\\iterative.json"
+    "src/rft_rllm/__init__.py",
+    "src/rft_rllm/__main__.py",
+    "src/rft_rllm/budget.py",
+    "src/rft_rllm/cli.py",
+    "src/rft_rllm/config.py",
+    "src/rft_rllm/data.py",
+    "src/rft_rllm/flow.py",
+    "src/rft_rllm/metrics.py",
+    "src/rft_rllm/pipeline.py",
+    "src/rft_rllm/prompts.py",
+    "src/rft_rllm/raw_sft_dataset.py",
+    "src/rft_rllm/reporting.py",
+    "src/rft_rllm/runtime.py",
+    "src/rft_rllm/train_grpo.py",
+    "src/rft_rllm/train_sft.py",
+    "src/rft_rllm/verl_compat.py",
+    "scripts/check_light.py",
+    "tests/test_data.py",
+    "tests/test_flow.py",
+    "tests/test_metrics.py",
+    "tests/test_pipeline.py",
+    "tests/test_reporting.py",
+    "tests/test_training.py",
+    "configs/baseline.json",
+    "configs/deepmath_16k.json",
+    "configs/deepmath_8k.json",
+    "configs/formal.json",
+    "configs/gsm8k_debug.json",
+    "configs/high_precision.json",
+    "configs/iterative.json"
   ],
+  "tests_run": 51,
   "checks": [
     "AST",
     "TOML/JSON",
-    "three CLI plans",
-    "tiny pass@k/incomplete-grid smoke"
+    "all preset CLI plans",
+    "pass@k/incomplete-grid smoke",
+    "CPU regression suite"
   ],
   "not_run": [
-    "GPU dependencies",
-    "model/data downloads",
-    "inference",
-    "training"
-  ]
+    "Pinned GPU stack end-to-end integration",
+    "GPU model inference",
+    "SFT or GRPO training",
+    "Actual DeepMath download/preparation",
+    "Qwen3.5 checkpoint inference/training"
+  ],
+  "tests_skipped": 4,
+  "tests_skipped_reason": "Four tensor checks require torch, which is absent from the minimal Python interpreter; all four were subsequently included in the successful CPU torch training suite.",
+  "additional_training_suite": {
+    "tests_run": 11,
+    "tests_skipped": 0,
+    "status": "passed",
+    "device": "CPU",
+    "environment": "Existing local training environment; not an installation test of the pinned rLLM GPU stack"
+  },
+  "manual_checks": {
+    "real_cached_data": {
+      "math_train_rows": 7500,
+      "gsm8k_train_rows": 7473,
+      "splits": {
+        "pilot": 2048,
+        "full": 7243,
+        "dev": 256,
+        "test": 500,
+        "gsm8k_debug": 32
+      },
+      "reference_repairs": {
+        "unbraced_digit": 2,
+        "audited_empty_box": 2
+      },
+      "unknown_levels": 2,
+      "pilot_subset_of_full": true,
+      "dev_unchanged": true,
+      "train_dev_test_disjoint": true
+    },
+    "pinned_upstream_split_loading": {
+      "status": "passed",
+      "sequence": [
+        "test",
+        "train",
+        "test"
+      ],
+      "actual_task_ids": [
+        "test:heldout",
+        "train:training",
+        "test:heldout"
+      ],
+      "scope": "Real pinned materializer/loader with a simulated registry; no model inference"
+    },
+    "base_tokenizer_and_sft_adapter": {
+      "status": "passed",
+      "model": "Qwen/Qwen3-1.7B-Base",
+      "scope": "Cached tokenizer, raw prompt IDs, BPE boundary, temporary checkpoint overlay and parquet adapter; no weight loading"
+    },
+    "qwen35_processor": {
+      "status": "passed",
+      "scope": "CPU Qwen3VLProcessor text-template check using the available Qwen3 tokenizer; no Qwen3.5 weights or tokenizer integration test"
+    },
+    "static_checks": [
+      "ruff E9/F",
+      "bash -n scripts/setup_linux.sh",
+      "git diff --check"
+    ],
+    "eos_logprob_gradient": {
+      "status": "passed",
+      "scope": "Current adapter plus verl v0.8.0 no_padding_2_padding on CPU; terminal EOS and multi-turn observation/action alignment",
+      "original_terminal_labels": [
+        20
+      ],
+      "corrected_terminal_labels": [
+        20,
+        0
+      ],
+      "corrected_multi_turn_labels": [
+        20,
+        0,
+        22,
+        0
+      ]
+    }
+  }
 }

@@ -1,0 +1,13 @@
+{
+  "extends": "baseline.json",
+  "experiment": {"name": "qwen3_1p7b_base_gsm8k_debug"},
+  "data": {
+    "name": "gsm8k_debug",
+    "kind": "gsm8k",
+    "source": "openai/gsm8k",
+    "source_revision": "main",
+    "registry_name": "rft_gsm8k_debug",
+    "debug_size": 32
+  },
+  "evaluation": {"attempts": 8, "ks": [1, 2, 4, 8], "concurrency": 8}
+}

@@ -1,0 +1,5 @@
+{
+  "extends": "deepmath_8k.json",
+  "experiment": {"name": "qwen3_1p7b_base_deepmath16k"},
+  "data": {"name": "deepmath16k", "registry_name": "rft_deepmath16k", "train_size": 16384}
+}

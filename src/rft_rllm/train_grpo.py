@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .prompts import RAW_CHAT_TEMPLATE
+
 
 def _override(key: str, value: Any) -> str:
     """Encode one Hydra value without shell interpolation."""
@@ -37,6 +39,7 @@ def build_overrides(settings: dict[str, Any], model: str, output: Path) -> list[
     values: dict[str, Any] = {
         "+model.name": model,
         "actor_rollout_ref.model.path": model,
+        "actor_rollout_ref.model.custom_chat_template": RAW_CHAT_TEMPLATE,
         "actor_rollout_ref.model.lora.rank": 0,
         "actor_rollout_ref.actor.optim.lr": float(grpo["lr"]),
         "actor_rollout_ref.actor.data_loader_seed": int(grpo["seed"]),
@@ -55,11 +58,15 @@ def build_overrides(settings: dict[str, Any], model: str, output: Path) -> list[
         "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu": 1,
         "actor_rollout_ref.rollout.max_model_len": max_prompt + max_response,
         "actor_rollout_ref.rollout.gpu_memory_utilization": float(resources.get("gpu_memory_utilization", 0.5)),
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm.chat_template": RAW_CHAT_TEMPLATE,
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm.chat_template_content_format": "string",
+        "+actor_rollout_ref.rollout.engine_kwargs.vllm.generation_config": "vllm",
         "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu": 1,
         "rllm.data.train_batch_size": batch_size,
         "rllm.data.max_prompt_length": max_prompt,
         "rllm.data.max_response_length": max_response,
         "rllm.data.seed": int(grpo["seed"]),
+        "rllm.workflow.retry_limit": 1,
         "rllm.algorithm.adv_estimator": "grpo",
         "rllm.algorithm.norm_adv_by_std_in_grpo": True,
         "rllm.algorithm.loss_agg_mode": "seq-mean-token-mean",
@@ -165,9 +172,11 @@ def main(argv: list[str] | None = None) -> None:
 
     from rllm.data import DatasetRegistry
 
-    name = settings["data"]["registry_name"]
+    from rft_rllm.data import registry_name
+
+    name = registry_name(settings, "train")
     train_dataset = DatasetRegistry.load_dataset(name, "train")
-    val_dataset = DatasetRegistry.load_dataset(name, "dev")
+    val_dataset = DatasetRegistry.load_dataset(registry_name(settings, "dev"), "dev")
     if train_dataset is None or val_dataset is None or len(val_dataset) == 0:
         raise RuntimeError(f"Prepare the fixed {name!r} train/dev datasets before launching GRPO.")
     config, budget = build_config(settings, args.model, output, len(train_dataset))
@@ -177,6 +186,10 @@ def main(argv: list[str] | None = None) -> None:
         return
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Refusing to reuse nonempty GRPO output: {output}. Choose a new run directory.")
+    from rft_rllm.verl_compat import ADAPTER_NAME, BUILDER_SHA256, initialize_ray, install
+
+    install()
+    budget["attention_mask_adapter"] = {"name": ADAPTER_NAME, "upstream_builder_sha256": BUILDER_SHA256}
     output.mkdir(parents=True, exist_ok=True)
     (output / "resolved_config.yaml").write_text(OmegaConf.to_yaml(config, resolve=True), encoding="utf-8")
     (output / "budget_plan.json").write_text(json.dumps(budget, indent=2) + "\n", encoding="utf-8")
@@ -193,7 +206,11 @@ def main(argv: list[str] | None = None) -> None:
         train_dataset=train_dataset,
         val_dataset=val_dataset,
     )
-    trainer.train()
+    ray = initialize_ray(config)
+    try:
+        trainer.train()
+    finally:
+        ray.shutdown()
 
 
 if __name__ == "__main__":

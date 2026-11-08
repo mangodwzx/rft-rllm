@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import defaultdict
 from pathlib import Path
 from statistics import fmean
 from typing import Any
+
+
+def task_fingerprint(question: str) -> int:
+    """A question identifier that survives JSON and float-valued eval signals."""
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Task question must be a non-empty string")
+    return int(hashlib.sha256(question.strip().encode("utf-8")).hexdigest()[:12], 16)
 
 
 def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
@@ -38,12 +46,17 @@ def summarize_run(
     ks: list[int],
     expected_attempts: int | None = None,
     expected_tasks: int | None = None,
+    task_rows: list[dict] | None = None,
 ) -> dict:
     """Read ``results.json``; refuse incomplete or duplicated task/attempt grids.
 
     Error attempts remain in every denominator and count as failures. Missing
     telemetry is unknown (``None``), never an inferred zero. ``coverage_counts``
     reports the denominator actually available for each telemetry mean.
+
+    With ``task_rows``, successful calls must carry a matching question
+    fingerprint. Failed calls may lack it, and remain failures with explicitly
+    recorded identity coverage. Difficulty/subject subsets use these same rows.
     """
     result_path = Path(run_dir) / "results.json"
     with result_path.open(encoding="utf-8-sig") as handle:
@@ -82,6 +95,14 @@ def summarize_run(
         item = dict(item, attempt=attempt)
         by_task[idx][attempt] = item
 
+    if expected_tasks is not None:
+        _integer(expected_tasks, "expected_tasks", minimum=1)
+    if task_rows is not None:
+        if not isinstance(task_rows, list) or not task_rows or not all(isinstance(row, dict) for row in task_rows):
+            raise ValueError("task_rows must be a non-empty list of task objects")
+        if expected_tasks is not None and len(task_rows) != expected_tasks:
+            raise ValueError("task_rows count differs from expected_tasks")
+        expected_tasks = len(task_rows)
     task_count = len(by_task) if expected_tasks is None else _integer(expected_tasks, "expected_tasks", minimum=1)
     if set(by_task) != set(range(task_count)):
         raise ValueError(f"Expected task indices 0..{task_count - 1}; got {sorted(by_task)}")
@@ -90,6 +111,59 @@ def summarize_run(
         if missing:
             raise ValueError(f"Incomplete task {idx}: missing attempts {sorted(missing)}")
 
+    identity_coverage = {"verified_rollouts": 0, "total_rollouts": len(items), "unverified_error_rollouts": 0}
+    identity_hash = None
+    if task_rows is not None:
+        fingerprints = [task_fingerprint(row.get("question")) for row in task_rows]
+        for idx, group in by_task.items():
+            for attempt, item in group.items():
+                value = (item.get("signals") or {}).get("task_fingerprint")
+                if value is None and item.get("error") is not None:
+                    identity_coverage["unverified_error_rollouts"] += 1
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value != fingerprints[idx]:
+                    raise ValueError(f"Task fingerprint mismatch or missing at idx={idx}, attempt={attempt}")
+                identity_coverage["verified_rollouts"] += 1
+        # Include grouping metadata so the paired subset comparison cannot
+        # silently pair different difficulty/subject assignments.
+        identities = [{"question": row["question"].strip(), "level": row.get("level"),
+                       "subject": str(row.get("subject") or "unknown")} for row in task_rows]
+        identity_hash = hashlib.sha256(json.dumps(identities, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    summary = {
+        "run_dir": str(Path(run_dir).resolve()),
+        "dataset_name": result.get("dataset_name"),
+        "model": result.get("model"),
+        "agent": result.get("agent"),
+        **_summarize_groups(list(by_task.values()), ks, attempts),
+        "task_identity_sha256": identity_hash,
+        "identity_coverage": identity_coverage if task_rows is not None else None,
+    }
+    if task_rows is not None:
+        by_level: dict[str, list[int]] = {str(level): [] for level in range(1, 6)}
+        by_level["unknown"] = []
+        by_subject: dict[str, list[int]] = defaultdict(list)
+        for idx, row in enumerate(task_rows):
+            level = row.get("level")
+            if level is not None and (isinstance(level, bool) or not isinstance(level, int) or level not in range(1, 6)):
+                raise ValueError(f"Invalid normalized MATH level for task {idx}: {level!r}")
+            by_level[str(level) if level is not None else "unknown"].append(idx)
+            by_subject[str(row.get("subject") or "unknown")].append(idx)
+
+        def subset(indices: list[int]) -> dict:
+            return _summarize_groups([by_task[idx] for idx in indices], ks, attempts)
+
+        summary["subsets"] = {
+            "level_4_5": subset(by_level["4"] + by_level["5"]),
+            "by_level": {level: subset(indices) for level, indices in by_level.items()},
+            "by_subject": {subject: subset(indices) for subject, indices in sorted(by_subject.items())},
+        }
+    return summary
+
+
+def _summarize_groups(groups: list[dict[int, dict]], ks: list[int], attempts: int) -> dict:
+    """Aggregate a complete subset, retaining its own task/rollout denominators."""
+    task_count = len(groups)
     counts: list[int] = []
     response_tokens: list[float] = []
     correct_response_tokens: list[float] = []
@@ -97,7 +171,7 @@ def summarize_run(
     response_chars: list[float] = []
     truncated: list[float] = []
     errors = 0
-    for group in by_task.values():
+    for group in groups:
         correct = 0
         for item in group.values():
             failed = item.get("error") is not None
@@ -127,22 +201,18 @@ def summarize_run(
             for count in counts
         )
         for k in ks
-    }
+    } if counts else None
     return {
-        "run_dir": str(Path(run_dir).resolve()),
-        "dataset_name": result.get("dataset_name"),
-        "model": result.get("model"),
-        "agent": result.get("agent"),
         "tasks": task_count,
         "attempts": attempts,
         "total": total,
         "correct": correct,
         "errors": errors,
-        "accuracy": correct / total,
+        "accuracy": correct / total if total else None,
         # For solved/correct selection without caps or dedup, this is the
         # correctness acceptance rate before any missing-message exclusions.
-        "acceptance_rate": correct / total,
-        "observed_task_coverage": sum(count > 0 for count in counts) / task_count,
+        "acceptance_rate": correct / total if total else None,
+        "observed_task_coverage": sum(count > 0 for count in counts) / task_count if task_count else None,
         "pass_at": pass_at,
         "mean_response_tokens": _mean(response_tokens),
         "mean_correct_response_tokens": _mean(correct_response_tokens),
@@ -168,6 +238,7 @@ def compare_runs(
     ks: list[int],
     expected_attempts: int | None = None,
     expected_tasks: int | None = None,
+    task_rows: list[dict] | None = None,
 ) -> dict[str, dict]:
     """Summarize named arms using one requested evaluation protocol.
 
@@ -177,10 +248,50 @@ def compare_runs(
     if not named_runs:
         raise ValueError("Provide at least one evaluation run")
     summaries = {
-        name: summarize_run(path, ks, expected_attempts, expected_tasks)
+        name: summarize_run(path, ks, expected_attempts, expected_tasks, task_rows)
         for name, path in named_runs.items()
     }
     protocols = {(row["dataset_name"], row["tasks"], row["attempts"], row["agent"]) for row in summaries.values()}
     if len(protocols) != 1:
         raise ValueError("Compared runs must use the same dataset, task count, attempts and agent")
     return summaries
+
+
+def compare_summaries(summaries: dict[str, dict]) -> dict[str, dict]:
+    """Differences over the same tasks; these are not significance estimates.
+
+    With complete equal-sized attempt grids, subtracting the two task means
+    equals the mean of paired per-task differences. Identity checks and the
+    run protocol establish the pairing; generation randomness is independent.
+    """
+    missing = {"base", "rft", "grpo"} - summaries.keys()
+    if missing:
+        raise ValueError(f"Missing comparison groups: {sorted(missing)}")
+    selected = [summaries[name] for name in ("base", "rft", "grpo")]
+    identities = {row.get("task_identity_sha256") for row in selected}
+    if None in identities or len(identities) != 1:
+        raise ValueError("Paired differences require the same task_rows identity for all groups")
+
+    def difference(left: dict, right: dict) -> dict:
+        if (left["tasks"], left["attempts"]) != (right["tasks"], right["attempts"]):
+            raise ValueError("Compared subsets must have identical task counts and attempts")
+        lhs, rhs = left["pass_at"], right["pass_at"]
+        if (lhs is None) != (rhs is None) or (lhs is not None and lhs.keys() != rhs.keys()):
+            raise ValueError("Compared subsets must report the same pass@k values")
+        return {
+            "tasks": left["tasks"],
+            "attempts": left["attempts"],
+            "accuracy_delta": left["accuracy"] - right["accuracy"] if left["tasks"] else None,
+            "pass_at_delta": {k: lhs[k] - rhs[k] for k in lhs} if lhs is not None else None,
+        }
+
+    comparisons = {}
+    for left_name, right_name in (("grpo", "rft"), ("rft", "base"), ("grpo", "base")):
+        left, right = summaries[left_name], summaries[right_name]
+        comparisons[f"{left_name}_minus_{right_name}"] = {
+            "left": left_name,
+            "right": right_name,
+            "overall": difference(left, right),
+            "level_4_5": difference(left["subsets"]["level_4_5"], right["subsets"]["level_4_5"]),
+        }
+    return comparisons

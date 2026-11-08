@@ -1,112 +1,128 @@
-# rft-rllm：官方 RFT–GRPO 基线
+# rft-rllm：Base 模型的 RFT–GRPO 对比框架
 
-从同一个初始 checkpoint 比较 **初始模型、RFT、GRPO** 的 pass@k、回答长度和截断率。默认先做一轮离线 RFT：用初始模型在训练集生成回答，保留正确轨迹，再交给官方 SFT 训练。`configs/iterative.json` 提供三轮迭代式 RFT。
+从同一个冻结的 Base checkpoint 出发，比较 **初始模型、离线 RFT、GRPO** 的 pass@k、回答长度和截断率。训练与评估共用三条手工 few-shot 示例、raw-completion 提示和官方数学判分器，重点观察整体及 Level 4–5 难题上的差异。
 
-本项目负责数据划分、配置、进程与 checkpoint 衔接、日志及指标汇总。RFT 使用官方 `rllm eval → rllm dataset from-eval → rllm sft --backend verl`；GRPO 使用官方数学 cookbook 的 `AgentTrainer(backend="verl")` 路径。没有自定义 RFT/GRPO 损失。实验定义见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
+RFT 使用官方 rLLM 生成、正确轨迹筛选和 `AgentSFTTrainer(backend="verl")`；GRPO 使用 `AgentTrainer(backend="verl")`。本项目负责数据、Base 模型输入适配、训练编排和汇总，不自定义训练损失。实验口径见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
 
-## 起步配置
+Base 适配包含统一 raw 提示、SFT 的 prompt/completion mask，以及 GRPO 中 EOS 与 padding 共用 token ID 时的长度 mask 修复。后者带固定上游源码校验，并安装到实际训练的 Ray 工作进程。
 
-| 项目 | `configs/baseline.json` |
+## 模型与预设
+
+```bash
+python -m rft_rllm models
+```
+
+| `--model` | 初始 checkpoint |
 | --- | --- |
-| 初始模型 | `Qwen/Qwen3-1.7B`，首次运行冻结 HF revision |
-| 训练 / dev / 测试 | MATH 2048 / 256 题；完整 MATH-500 |
-| 提示与判分 | 同一数学 chat flow、同一官方数学判分器 |
-| 采样 | temperature=1.0、top_p=1.0、最多 4096 新 token |
-| RFT | 训练题每题 8 次；全部正确轨迹；SFT 1 epoch、lr=1e-6、batch=32 |
-| GRPO | 每批 32 题、每题 8 次；1 epoch、lr=1e-6；关闭 KL |
-| 训练方式 | 两组均全参数微调；默认 1 GPU，显存是否足够需在目标机器确认 |
-| 评估 | 每题 64 次，k=1、2、4、8、16、32、64 |
+| `qwen3_1p7b_base` | `Qwen/Qwen3-1.7B-Base` |
+| `qwen3_4b_base` | `Qwen/Qwen3-4B-Base` |
+| `qwen35_2b_base` | `Qwen/Qwen3.5-2B-Base` |
+| `qwen35_4b_base` | `Qwen/Qwen3.5-4B-Base` |
 
-这里的模型使用正常 chat template。它与旧目录中的 raw-completion Base 模型实验属于不同协议。`formal.json` 只把评估提高到每题 1024 次、k≤256，训练配置仍继承 baseline；`iterative.json` 只把 RFT 改成三轮，不自动扩大 GRPO 预算。
+默认选择 Qwen3-1.7B-Base。`--model` 同时调整实验名；`--name` 可显式指定名称。四个模型共用协议，各自运行，不会由一次 `run` 自动启动全部模型。
+
+| 配置 | 训练题池 | 测试采样 |
+| --- | --- | --- |
+| `baseline.json` | MATH 分层 pilot2048 | 每题 N=256 |
+| `formal.json` | MATH full，包含 pilot，排除同一 dev256 | 每题 N=256 |
+| `high_precision.json` | 同 formal | 每题 N=1024 |
+| `iterative.json` | pilot2048，三轮离线 RFT | 每题 N=256 |
+| `gsm8k_debug.json` | 仅 GSM8K 固定 debug32，生成和判分 | 每题 N=8，不训练 |
+| `deepmath_8k.json` / `deepmath_16k.json` | DeepMath 固定 8192 / 16384 题 | 复用 MATH dev256 和 MATH-500 |
+
+默认测试为完整 MATH-500，报告 `k=1,2,4,8,16,32,64,128,256`；高精度预设只增加 N，保留这些 k。DeepMath 需要手动选择配置。`formal` 和 `high_precision` 使用独立实验名，执行 `run` 时会重新训练和评估。
+
+共享训练设置为 temperature=1.0、top_p=1.0，prompt 和回答各最多 4096 token。RFT 每题采样 8 次，全部正确轨迹进入官方 SFT，1 epoch、lr=1e-6、batch=32；GRPO 为每批 32 题×8 回答、1 epoch、lr=1e-6、KL=0。两组均走全参数路径，SFT 长度上限为 8193，为 EOS 额外留一个位置。默认 1 GPU；实际显存和硬件适配须在目标机器验证。
 
 ## 安装
 
-训练和推理面向 **Linux / CUDA GPU** 环境，Python 3.11；当前 Windows 工作区用于编辑与轻量检查。先把整个目录放到训练机器，再执行：
+推理和训练面向 Linux/CUDA。安装脚本需要 `uv`，默认创建 Python 3.11 环境：
 
 ```bash
-cd rft-rllm
 bash scripts/setup_linux.sh
 source .venv/bin/activate
 ```
 
-安装脚本固定 rLLM 提交 `4e828c81680e5a85b638ceedeaf09d1e90109ca8`，使用其声明的 verl 0.8.0 GPU 依赖。CUDA/PyTorch 安装需要与目标机器匹配；运行记录保存实际依赖 freeze，不能把一个源码提交当成全部依赖都已锁定。安装不会自动下载模型或启动训练。
+脚本固定 rLLM 提交 `4e828c81680e5a85b638ceedeaf09d1e90109ca8`，使用其 verl 0.8.0 依赖，保存实际依赖 freeze。默认 CUDA wheel 后端为 `cu128`，可通过 `TORCH_BACKEND` 调整。安装不会下载模型或启动训练。
 
-只查看计划时可在可用的 Python 3.11+ 环境执行 `python -m pip install -e .`；本地包不自动安装 GPU 栈。
+仅查看计划和运行轻量检查，可在 Python 3.11/3.12 中执行 `python -m pip install -e .`；本地包本身不安装 GPU 栈。
 
 ## 运行
 
-先修改 JSON 中的模型、GPU 数、并行度和预算；正式运行前保留明确的 `experiment.name`。
+先查看计划，再用 GSM8K 检查真实模型的生成和判分：
 
 ```bash
-# 查看计划，不下载模型、不启动 GPU 任务
-python -m rft_rllm plan --config configs/baseline.json
+# 只打印计划，不下载数据/模型，不启动 GPU 任务
+python -m rft_rllm plan --config configs/baseline.json --model qwen3_1p7b_base
 
-# 完整执行：准备 → 初始模型评估 → RFT → GRPO → 终点评估 → 汇总
-python -m rft_rllm run --config configs/baseline.json --stage all
+# 固定 32 题 × 8 次，仅生成、判分；--stage all 也只执行 debug
+python -m rft_rllm run --config configs/gsm8k_debug.json --stage debug
+
+# Pilot：准备 → Base 评估 → RFT → GRPO → 终点评估 → 汇总
+python -m rft_rllm run --config configs/baseline.json
+
+# Full：与 pilot 共用 dev，训练题池扩大到全部剩余 MATH train
+python -m rft_rllm run --config configs/formal.json
 ```
 
-也可按阶段执行，已完成阶段通过状态文件跳过；这不等于任意中断的 GPU 训练都能从中间 step 恢复：
+四个模型可用同一组 CLI 参数查看计划；将 `plan` 改成 `run` 才会依次执行实验：
+
+```bash
+for model in qwen3_1p7b_base qwen3_4b_base qwen35_2b_base qwen35_4b_base; do
+  python -m rft_rllm plan --config configs/formal.json \
+    --model "$model" --gpus 1 --tensor-parallel-size 1
+done
+```
+
+`--gpus` 控制训练 GPU 数，`--tensor-parallel-size` 控制推理张量并行度，物理设备用 `CUDA_VISIBLE_DEVICES` 选择。`--revision <HF提交或标签>` 指定远端版本，首次运行记录确定提交；`--local-model /path/to/checkpoint` 使用已有的不可变完整 HF checkpoint。可追加 `--name <实验名>` 区分预算或硬件设置。
+
+MATH 和 DeepMath 支持分阶段执行，例如：
 
 ```bash
 python -m rft_rllm run --config configs/baseline.json --stage prepare
-python -m rft_rllm run --config configs/baseline.json --stage base
 python -m rft_rllm run --config configs/baseline.json --stage rft
 python -m rft_rllm run --config configs/baseline.json --stage grpo
+python -m rft_rllm run --config configs/baseline.json --stage base
 python -m rft_rllm run --config configs/baseline.json --stage evaluate
 python -m rft_rllm run --config configs/baseline.json --stage report
 ```
 
-生成和评估时，程序启动自己的本地 vLLM 服务，结束后关闭；训练前释放该服务占用的显存。默认端口为 `127.0.0.1:8010`，可在配置中修改。RFT 首轮和 GRPO 都读取冻结的初始模型；迭代 RFT 后续轮从上一轮导出的模型重新生成并微调，优化器按轮重新初始化。
+生成和评估各自启动并关闭本地 vLLM 服务，默认地址为 `127.0.0.1:8010`，训练前释放该服务。状态文件跳过已完成阶段；中断且产物不完整的训练仍需检查和归档，不能据此认定支持任意 step 恢复。
 
-```bash
-# 三轮迭代式 RFT
-python -m rft_rllm run --config configs/iterative.json
+## 数据与产物
 
-# 较大评估预算；默认仍会完整执行三组基线
-python -m rft_rllm run --config configs/formal.json
-```
+`data/math/` 一次生成 `pilot.jsonl`、`full.jsonl`、`dev.jsonl`、`test.jsonl` 及 manifest。MATH 按 subject×level 确定性分层，先留 dev256，再从剩余题目选 pilot2048；切换 pilot/full 不改变 dev。真实缓存回归得到 full7243，正式题数以本次 manifest 为准。其他协议分别写入 `data/gsm8k_debug/`、`data/deepmath8k/`、`data/deepmath16k/`。每个物理 split 使用不同的 rLLM registry 名称，防止上游 materialization 缓存混用训练集和测试集。
 
-变更已有运行的训练/评估配置时，使用新的 `experiment.name`，避免把不同协议的产物混在一起。数据由整个项目共用 `data/` 和 `.rllm/`；改变数据源、划分或题数时需使用新的项目目录或单独保留原 `data/` 后建立新数据，程序不会自动覆盖已有 manifest。只重新汇总已有结果可运行 `--stage report`。
-
-## 产物
-
-数据 JSONL 与 manifest 位于项目根目录的 `data/`，官方 registry 位于 `.rllm/`。每组实验输出位于 `runs/<experiment.name>/`：
+每次实验位于 `runs/<experiment.name>/`：
 
 ```text
-config.json                 解析后的实验配置
-environment.json            本次运行的 Python 与实际安装包版本
-initial_model.json          初始模型来源与冻结记录
-state.json                  阶段完成状态
-base_eval/                  初始模型的官方 results.json 与 episodes/
-rft/round_01/collect/        训练集生成、判分和完整轨迹
-rft/round_01/train/          官方 SFT checkpoint 与配置
-rft/round_01/hf/             导出的 HF 模型
-grpo/train/                 官方 GRPO checkpoint、配置、预算和 rollout 日志
-grpo/train/global_step_N/actor/huggingface/  GRPO 原生导出的完整 HF 模型
-grpo/hf/                    原生权重缺失时由 merger 导出的备用位置
-rft_eval/、grpo_eval/        两组终点的官方评估结果
-summary.json、summary.csv   三组可比较指标
-budget.json                 各轮接受率、生成预算、可得 token 统计和命令耗时
-commands.jsonl、logs/       命令、耗时、执行日志
+config.json、environment.json    解析配置与实际安装包版本
+initial_model.json、initial_model/  冻结来源与本次运行的 tokenizer 适配目录
+state.json                       阶段状态
+base_eval/、rft_eval/、grpo_eval/  results、episodes、protocol、summary
+rft/round_01/collect/、train/、hf/  候选轨迹、SFT checkpoint、导出模型
+grpo/train/                      GRPO checkpoint、有效配置、预算计划与 rollout 日志
+summary.json、summary.csv         整体、Level 4–5、各 level、各 subject 指标
+comparison.json、comparison.csv   三组之间的 pass@k 差值
+pass_at_k.svg                    整体/难题曲线及 GRPO−RFT 差值，共四个面板
+budget.json、commands.jsonl、logs/  可得预算、命令与耗时
 ```
 
-SFT 的分片 checkpoint 需要调用官方 `verl.model_merger` 导出，不能把其中只有配置/tokenizer 的 `huggingface/` 目录直接当作完整模型。编排层负责导出和下一阶段路径衔接。
+GSM8K 仅生成 `debug_eval/` 及通用运行记录。SFT 分片 checkpoint 通过官方 merger 导出；GRPO 优先使用其完整 HF 导出，必要时再合并分片。不能将只有配置和 tokenizer 的目录当作完整权重。
 
-## 如何解读结果
+变更源码、提示、模型或训练/评估设置时使用新实验名；变更数据源、划分 seed 或 pilot 大小时使用新的 `data.name`。旧版根目录 `data/manifest.json` 和已有运行不会自动迁移或覆盖。远端模型缓存保持原样，当前运行通过权重软链接及独立 tokenizer 文件适配 raw 输入；原始权重必须保持可用且不可变。
 
-- pass@k 由每题固定 N 次采样估计，再按题平均；仅报告 k≤N。缺失或重复的题目/attempt 会使汇总报错，运行错误保留并按失败处理。
-- `acceptance_rate` 是正确轨迹数/全部生成次数；实际 SFT 样本还要求轨迹具有可用 messages。`observed_task_coverage` 是 N 次采样内至少成功一次的题目比例。
-- 回答长度和正确回答长度使用服务报告的生成 token；缺失时为 `null`，并列出统计覆盖数。截断率依据实际 `finish_reason="length"`，不把缺失遥测记成零。
-- 两组共享题池、提示、判分和测试采样协议，但离线 RFT 与在线 GRPO 的生成次数、训练 token 和更新次数不相等。用日志和预算记录说明差异，不能据此宣称等算力或隔离了优化目标的影响。
-- `budget.json` 区分计划值与观察值；checkpoint 的 `trainer_steps` 不保证等于优化器更新数。未直接计量的反向传播 token 和更新数保留为 `null`，GRPO token 汇总附有日志覆盖数。
-- 固定数据划分与部分训练/服务 seed 不保证 GPU 或并发请求逐位可复现；不要给同题的每次采样设置相同请求 seed。
+## 解读与验证
 
-当前交付仅搭建框架并做轻量检查，没有运行 GPU 训练、模型推理或大规模测试；兼容性和显存需求仍须由目标机器上的首次小规模运行确认。
+pass@k 按题计算再平均，只报告 k≤N；错误 attempt 按失败计，缺失、重复或任务指纹不匹配会使汇总报错。缺失 token/截断遥测保留为 `null`，同时报告覆盖数。差值图使用百分点，不包含置信区间或显著性声明。
 
-轻量检查记录位于 `CHECKS.json`；需要时运行 `python scripts/check_light.py`，不会加载 GPU 框架。
+RFT 与 GRPO 共享题池和测试协议，但生成 token、优化器更新及训练成本并不相等。`budget.json` 分开记录计划和观察值，未计量的反向传播 token 保留为空；三轮 RFT 也不会自动扩大 GRPO 预算。
 
-## 官方实现依据
+已完成 CPU 回归及真实缓存的 MATH/GSM8K 数据检查。尚未运行 GPU 推理或训练，也未下载和验证真实 DeepMath。Qwen3.5 的输入和 checkpoint 适配已纳入代码；这不表示其硬件、显存和训练依赖已经实测兼容。Qwen3.5 保留完整多模态 checkpoint，以文本题目输入，未配置视觉模块冻结。
 
-- [rLLM 固定版本](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8)
-- [评估入口](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/cli/eval.py)、[正确轨迹筛选](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/cli/dataset.py)、[SFT 入口](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/cli/sft.py)
-- [官方数学训练 cookbook](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8/cookbooks/math)、[verl 模型导出](https://github.com/volcengine/verl/blob/v0.8.0/verl/model_merger/__main__.py)
+```bash
+python scripts/check_light.py
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
+当前检查范围见 `CHECKS.json`。上游依据：[rLLM 固定版本](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8)、[数学 cookbook](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8/cookbooks/math)、[verl 0.8.0](https://github.com/volcengine/verl/tree/v0.8.0)。

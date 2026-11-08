@@ -1,0 +1,5 @@
+{
+  "extends": "formal.json",
+  "experiment": {"name": "qwen3_1p7b_base_full_n1024"},
+  "evaluation": {"attempts": 1024}
+}

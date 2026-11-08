@@ -1,54 +1,72 @@
-# 实验协议
+# RFT–GRPO 实验协议
 
-## 问题与三组基线
+## 比较对象与模型
 
-首先观察同一起点下，官方 RFT 与 GRPO 完整训练流程的 pass@k、正确率、回答长度有何差异。初始模型提供训练前参照。此版本不实现旧框架的按题归一化 RFT、不要求先复现某篇论文，也不提前加入归一化或梯度机制消融。
+每次运行比较同一初始 checkpoint 的 Base、RFT 和 GRPO。目标是观察两种完整训练流程在 pass@k、回答长度及截断率上的差异，重点分析整体和 Level 4–5 题目。最终比较使用预定训练终点；dev 用于过程观察，测试集不参与轨迹筛选、训练或 checkpoint 选择。
 
-默认初始模型为 `Qwen/Qwen3-1.7B`，使用正常 chat template。模型远端 revision 首次解析为确定提交，RFT 首轮与 GRPO 复用该快照。替换成其他模型时须确认其 chat template 与官方 parser 支持情况；不能将结果标成旧 raw-completion Base 协议。
+支持 Qwen3-1.7B-Base、Qwen3-4B-Base、Qwen3.5-2B-Base、Qwen3.5-4B-Base。远端 revision 首次解析为确定提交，各训练分支复用本次冻结的初始权重。运行目录保存权重软链接和独立 tokenizer 配置，不修改源 checkpoint 或 HF 缓存。使用本地模型时，调用者须保持源目录不可变。
 
-## 数据与共享设置
+两组均使用全参数训练路径。Qwen3.5 保留完整多模态 checkpoint，实验输入为文本；配置没有显式冻结视觉模块。四个模型使用相同文本协议，仍需分别确认目标硬件和上游训练栈兼容性。
 
-MATH 原始 train 按问题文本做 NFKC/空白规范化、精确去重并排除测试重叠。固定 seed 的 hash 排序先留出 dev256，再选择 train2048；它不是按学科/难度分层抽样。测试使用完整 MATH-500，最终题数以 manifest 为准。精确去重不保证排除所有改写或语义相似题。
+## Raw-completion 提示与判分
 
-训练、RFT 收集和最终评估共用同一 flow、数学提示及官方数学判分器。参考解只用于提供答案与判分，RFT 监督文本来自模型生成。测试集不参与 RFT 筛选或 GRPO 训练。dev 用于过程观察；最终比较使用预定训练终点，不用测试成绩挑 checkpoint。
+[提示模块](../src/rft_rllm/prompts.py) 内置原实验的三条手工 few-shot 示例，依次为一元一次方程、矩形面积和骰子概率。示例与目标问题按 `Problem: … / Solution: …` 拼接，目标末尾停在 `Solution:`。RFT 收集、GRPO rollout 和终点评估均使用这一提示，参考解只用于获取答案和判分。
 
-默认统一 temperature=1.0、top_p=1.0、回答上限 4096 token。prompt 预算 2048，SFT 总长度上限 8192。具体过长输入处理由各官方入口执行，需结合日志确认数据未因长度约束产生不同筛选。
+OpenAI chat endpoint 仅作为 rLLM gateway 的传输接口：identity 模板原样输出单条 user 消息中的 raw 提示，不添加 ChatML、角色边界或 assistant 前缀。模型输入不是普通对话模板。提示版本和哈希写入产物；轨迹保留 prompt 与 assistant completion，供筛选和训练使用。
 
-## RFT 的准确含义
+判分委托固定版本的官方数学 evaluator。GSM8K 数据准备从 `####` 后提取数值参考答案，模型回答仍通过共享的数学提示和判分流程处理。
 
-1. 使用本轮起始模型，在固定训练题池上执行官方 `rllm eval --attempts 8`，保存完整成功和失败轨迹。
-2. 执行 `rllm dataset from-eval --filter solved --select correct --no-dedup`，保留全部正确轨迹。无每题数量上限、不选择最短答案、不按成功数重加权。
-3. 官方 `rllm sft --backend verl --lora-rank 0` 对这些轨迹的 assistant token 做交叉熵微调。默认 1 epoch、lr=1e-6、batch=32。
+默认 temperature=1.0、top_p=1.0，prompt/response 预算分别为 4096 token。SFT 总长度上限为 8193，额外预留 EOS；raw SFT adapter 拒绝超长样本，不静默截断。生成侧的超长请求或运行错误保留在评估结果中。各 attempt 不复用同一请求 seed，固定服务/训练 seed 也不保证并发 GPU 采样逐位一致。
 
-默认一轮为**离线 RFT**：采样数据只生成一次，SFT 期间不刷新。三轮配置为**迭代式 RFT**：后续轮从上一轮 HF 导出模型重新生成本轮正确轨迹，再继续训练模型权重；每轮重新建立优化器，不混入之前轮的轨迹。
+## 数据协议
 
-此路径使用成功样本混池及 batch token 平均，成功多的题目贡献更多轨迹；全错题不会进入 SFT。它并不等价于每题成功回答平均、零成功题保留在分母的在线 RFT。依据：[官方 curation](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/eval/curation.py)、[SFT backend](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/trainer/sft/verl_backend.py)、[verl SFT loss](https://github.com/volcengine/verl/blob/v0.8.0/verl/workers/utils/losses.py)。
+MATH 使用原始 train 和完整 MATH-500。问题文本经过 NFKC/空白规范化后做精确去重，并从训练候选中排除测试题和固定示例的精确重叠。该检查不声称排除改写或语义相似题。
 
-该固定版本的 episode 文件名回退可能包含 rollout 编号，导致 curation 的“任务数”显示与真实题数不同；因此不使用其 task-level 留出或 cap 功能。当前 solved/correct 筛选仍保留全部正确轨迹。真实题目覆盖从 `results.json` 的 `idx` 分组计算。
+按 **subject×level** 分层，以各层占比和最大余数法分配准确题数，层内和最终顺序由固定 seed 的问题哈希决定。先留出 dev256，再从剩余 full 题池选 pilot2048；full 包含 pilot，并排除同一 dev。`baseline.json` 使用 pilot，`formal.json` 使用 full，两者共享 `data/math/` 的物理文件。当前真实缓存回归为 pilot2048/full7243/dev256/test500，正式运行以 manifest 为准。
 
-## GRPO 与预算
+原始 MATH 的六条异常按明确规则处理：两条 `\boxed 2` / `\boxed 9` 参考答案仅允许单个数字修复；两条空框通过[审计表](../src/rft_rllm/reference_corrections.json)同时匹配问题与原解 SHA-256，修正为 0；两条 `Level ?` 保留为未知难度 `None`。修正只用于参考数据，不放宽模型判分。manifest 记录修正、未知难度、删除原因、分层数量和文件哈希。
 
-通过官方 unified config 与 `AgentTrainer(backend="verl")` 启动，使用组内标准化优势、官方 GRPO 更新及 sequence-mean/token-mean 归约。默认 32 题×8 回答、1 epoch、lr=1e-6、KL=0；不启用拒绝重采样或 stale-policy 异步训练。vLLM 的 async rollout 后端不代表异步策略训练。依据：[数学 cookbook](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8/cookbooks/math)。
+GSM8K 从官方 train 中固定选取 debug32，仅用于生成和判分检查，每题 8 次。该配置的 `--stage all` 也只执行 debug；训练阶段会被拒绝。
 
-RFT 只反向传播筛选后的成功轨迹，GRPO 在线刷新并使用组内全部回答。因此统一题池、采样上限和学习率只是共享协议，不构成严格等 token、等更新或等 FLOP 比较。记录每轮候选数、正确率、实际可训练轨迹数、训练 token、checkpoint step、耗时及上游日志；有缺失时明确留空。三轮 RFT 配置是额外实验，不能视作与一轮 GRPO 等预算。
+DeepMath 为手动启用的扩展：按相同 seed 的稳定哈希顺序取前 8192 或 16384 题，两规模嵌套；排除 MATH dev、MATH-500 和固定示例的精确重叠，沿用同一 dev/test。它不要求与 MATH 训练题池互斥。DeepMath 首次运行可建立所依赖的 MATH 数据；重用时验证完整协议，恢复时重新核对保护集哈希。真实 DeepMath 数据尚未下载验证。
 
-## 评估与汇总
+数据保存在 `data/<data.name>/`。registry 名包含有效数据配置指纹及物理 split，因此 train/dev/test/debug 互相隔离，pilot/full 也有不同注册名，避免固定 rLLM 版本按 benchmark 名缓存而忽略后续 split 的问题。评估逐条记录中的任务指纹进一步与 manifest 对应题目比对。
 
-三组在同一测试集上按相同顺序、相同提示和解码设置独立生成。pilot 每题 N=64；formal 每题 N=1024。第 i 题有 c_i 次正确时，使用：
+## RFT 与 GRPO
+
+RFT 每轮先从本轮起始模型在固定训练池上采样 8 次，再通过官方 `dataset from-eval --filter solved --select correct --no-dedup` 保留全部正确轨迹。不按题限制数量，不选择最短答案，不按成功数重加权；可用监督行数必须与正确轨迹数一致。
+
+筛选结果交给官方 `AgentSFTTrainer(backend="verl")`。本地 [raw SFT 数据适配器](../src/rft_rllm/raw_sft_dataset.py)仅负责 prompt/completion 分开分词、拼接及监督 mask：prompt 不参与损失，completion 和 EOS 参与损失。交叉熵、归约和优化仍使用官方 verl 实现；未复现旧版按题归一化的在线 RFT，也未使用固定 4096 分母的损失。
+
+默认一轮为离线 RFT，采样数据在 SFT 期间不刷新。`iterative.json` 执行三轮：每轮从上一轮导出的 HF 模型重新收集并微调，不混入此前轮的轨迹，每轮重新建立优化器。默认每轮 SFT 为 1 epoch、lr=1e-6、batch=32、LoRA rank=0。
+
+GRPO 走官方 unified config 和 `AgentTrainer(backend="verl")`，使用组内标准化优势、官方 GRPO 更新和 `seq-mean-token-mean` 归约。默认每批 32 题×8 回答、1 epoch、lr=1e-6、KL=0，不启用拒绝重采样或 stale-policy 异步训练；vLLM 的 async rollout 仅指服务后端。
+
+Base tokenizer 可能将 EOS 同时用作 padding token。固定 rLLM 版本按 token 值构造 attention mask，会遮掉真实 EOS；本地 [兼容适配器](../src/rft_rllm/verl_compat.py)依据捕获的真实序列长度恢复 attention mask 和 position IDs，保留官方 token、response mask、奖励、优势和损失。适配器通过 Ray worker hook 在实际构造训练 batch 的进程中安装，并校验 verl 版本及固定上游函数源码哈希。上游实现变化时会停止训练，要求重新核对适配。
+
+成功样本混池让 RFT 中成功多的题目贡献更多轨迹，全错题不进入 SFT。GRPO 在线刷新轨迹，训练组织与 RFT 不同。统一题池、采样上限和学习率不构成等 token、等更新或等 FLOP 比较；后端还可能丢弃不满 batch 的尾部样本。预算记录区分候选数、接受数、可得 token、trainer step 和耗时，未直接计量的反向传播 token/优化器更新保留为 `null`。三轮 RFT 不自动增加 GRPO 预算。
+
+## 评估、分组与图表
+
+三组对同一 MATH-500 按相同顺序和采样协议独立生成。默认 N=256；`high_precision.json` 使用 full 训练并将 N 提高到 1024。两者均报告 `k=1,2,4,8,16,32,64,128,256`，且严格要求 k≤N。第 i 题在 N 次中有 cᵢ 次正确：
 
 ```text
-pass@k_i = 1 - C(N - c_i, k) / C(N, k),  1 <= k <= N
-pass@k = 各题 pass@k_i 的平均
+pass@k_i = 1 - C(N - c_i, k) / C(N, k)
+pass@k   = 各题 pass@k_i 的平均
 ```
 
-官方已提供这一统计；本地汇总根据官方逐条记录重新计算，并更严格地拒绝缺失/重复的 attempt 和 k>N。基础输出包括 accuracy、pass@k、平均生成 token、正确回答平均 token、接受率、观察题目覆盖率、截断率、错误数及遥测覆盖数。token 数据缺失不重新分词冒充服务的原始 token。
+缺失、重复 attempt、任务指纹不一致或分组元数据错误会使汇总失败。运行错误按失败计入分母，不能通过重试到成功替换原记录。回答长度和正确回答长度使用服务返回的 completion token；截断率依据 `finish_reason="length"`。缺失遥测保留为 `null` 并报告覆盖数，不用重新分词代替原始服务计量。
 
-错误 attempt 计为失败，不能重试到成功后替换原记录。观察题目覆盖只表示 N 次采样至少成功一次，不代表已确定模型能力边界。这个首轮框架不输出显著性声明或跨种子置信区间；出现稳定差异后再增加独立训练种子和配对统计。
+输出包括整体、Level 4–5、各 level 和各 subject 分组；未知 level 单列，空组指标为空。`summary.csv` 列出各模型分支和分组，`comparison.json/csv` 给出分支间差值。`pass_at_k.svg` 的四个面板分别显示整体曲线、Level 4–5 曲线及对应的 GRPO−RFT 差值，横轴为 log₂(k)，差值以百分点显示。
 
-## 可追踪性与当前验证范围
+k=N 时 pass@k 等于观察到的题目覆盖率，不能据此确定能力边界。单次训练种子的曲线和差值不提供显著性结论；当前不输出置信区间。
 
-每次运行保留解析配置、模型快照来源、数据源 revision/文件哈希、实际环境 freeze、命令与日志。默认的 seed 控制范围有限：固定数据 hash 划分、服务初始化和部分 GRPO 随机性；官方 SFT CLI 没有完整 seed 接口。并发 GPU 采样不能保证逐位复现，也不为各 attempt 复用同一请求 seed。
+## 追踪、恢复与验证范围
 
-完成状态属于阶段级恢复。已有阶段可跳过；中断且产物不完整的训练不能自动认定成功。变更训练/评估配置应使用新 experiment 名称；项目共用 `data/` 与 `.rllm/`，改变数据配置还需独立保留原数据并使用新的数据目录/项目，不能仅换 experiment 名称后覆盖。formal preset 使用独立名称重新执行完整训练与评估，会额外消耗训练预算。SFT checkpoint 根目录和 GRPO 的 actor 子目录经官方 merger 转成 HF 权重后，才供下一轮或评估使用。
+运行保存解析配置、源码和提示指纹、模型 revision、数据源 revision/文件哈希、实际环境版本、命令与日志。配置或源码变化需要新实验名；数据源或划分变化需要新 `data.name`。仅切换 MATH pilot/full 可复用数据。旧版数据和运行不会自动迁移、覆盖或继续混用。
 
-当前仅完成代码框架与必要轻量检查。未安装并验证完整 GPU 栈，未执行训练或真实模型评估；这些不应表述为已复现实验结果。
+恢复以完成阶段为单位；中断且非空的阶段目录会要求检查和归档。SFT 分片 checkpoint 经官方 merger 导出后再用于下一轮或评估；GRPO 使用其完整 HF 权重或合并后的导出。`report` 校验已保存数据、任务顺序、提示和评估协议后重新汇总。
+
+当前验证覆盖 CPU 单元测试、配置/CLI 计划、真实缓存的 MATH/GSM8K 规范化和划分，以及合成 DeepMath 的保护集与嵌套规模测试。未执行 GPU 推理、SFT、GRPO 或完整真实 DeepMath 准备；不能将这些检查描述为已复现实验结果或已验证四种模型的 GPU 兼容性。
+
+上游依据：[rLLM 固定版本](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8)、[官方 curation](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/eval/curation.py)、[SFT backend](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/trainer/sft/verl_backend.py)、[数学 cookbook](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8/cookbooks/math)、[verl SFT loss](https://github.com/volcengine/verl/blob/v0.8.0/verl/workers/utils/losses.py)。

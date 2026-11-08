@@ -7,6 +7,13 @@ import os
 import re
 from pathlib import Path
 
+MODELS = {
+    "qwen3_1p7b_base": "Qwen/Qwen3-1.7B-Base",
+    "qwen3_4b_base": "Qwen/Qwen3-4B-Base",
+    "qwen35_2b_base": "Qwen/Qwen3.5-2B-Base",
+    "qwen35_4b_base": "Qwen/Qwen3.5-4B-Base",
+}
+
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -34,6 +41,24 @@ def load_config(path: Path, seen: frozenset[Path] = frozenset()) -> dict:
 def validate(config: dict) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", config["experiment"]["name"]):
         raise ValueError("experiment.name may contain only letters, digits, '_' and '-'")
+    data = config["data"]
+    kind = data.get("kind", "math")
+    if kind not in {"math", "gsm8k", "deepmath"}:
+        raise ValueError("data.kind must be math, gsm8k or deepmath")
+    for field in ("name", "registry_name", "math_data_name"):
+        if data.get(field) and not re.fullmatch(r"[A-Za-z0-9_-]+", data[field]):
+            raise ValueError(f"data.{field} must be a simple name, not a path")
+    size = data.get("train_size", 2048)
+    if size != "all" and (not isinstance(size, int) or isinstance(size, bool) or size < 1):
+        raise ValueError("data.train_size must be a positive integer or 'all'")
+    for key, default in (("dev_size", 256), ("pilot_size", 2048), ("debug_size", 32)):
+        value = data.get(key, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"data.{key} must be a positive integer")
+    if kind == "math" and size != "all" and size != data.get("pilot_size", 2048):
+        raise ValueError("For a MATH subset, set data.pilot_size equal to data.train_size")
+    if config["model"].get("kind", "base") != "base":
+        raise ValueError("This protocol uses Base models with the shared raw-completion prompt")
     for section, keys in {
         "sampling": ["max_tokens", "max_prompt_length"],
         "resources": ["gpus", "tensor_parallel_size"],
@@ -54,7 +79,7 @@ def validate(config: dict) -> None:
     if config["resources"]["gpus"] % config["resources"]["tensor_parallel_size"]:
         raise ValueError("gpus must be divisible by tensor_parallel_size")
     if not config["evaluation"]["ks"] or any(
-        not isinstance(k, int) or not 1 <= k <= config["evaluation"]["attempts"] for k in config["evaluation"]["ks"]
+        isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= config["evaluation"]["attempts"] for k in config["evaluation"]["ks"]
     ):
         raise ValueError("Each evaluation k must satisfy 1 <= k <= attempts")
     sft = config["rft"]["sft"]
@@ -63,10 +88,24 @@ def validate(config: dict) -> None:
             raise ValueError(f"rft.sft.{key} must be a positive integer")
     if sft["lora_rank"] != 0:
         raise ValueError("This comparison/export path uses full fine-tuning; set lora_rank=0")
-    if sft["max_length"] < config["sampling"]["max_tokens"] + config["sampling"]["max_prompt_length"]:
-        raise ValueError("SFT max_length must cover the entire prompt + response budget")
+    if sft["max_length"] < config["sampling"]["max_tokens"] + config["sampling"]["max_prompt_length"] + 1:
+        raise ValueError("SFT max_length must cover prompt + response budgets and the reconstructed EOS")
     if config["server"]["host"] != "127.0.0.1":
         raise ValueError("The managed inference server must use 127.0.0.1")
+
+
+def select_model(config: dict, key: str) -> dict:
+    """Select one model without accidentally reusing another model's output."""
+    if key not in MODELS:
+        raise ValueError(f"Unknown model: {key}")
+    previous = config["model"].get("key")
+    name = config["experiment"]["name"]
+    if previous == key:
+        return config
+    name = name.replace(previous, key, 1) if previous and previous in name else f"{name}_{key}"
+    return merge(config, {"experiment": {"name": name}, "model": {
+        "key": key, "repo_id": MODELS[key], "revision": "main", "local_path": None, "kind": "base",
+    }})
 
 
 def digest(value: dict) -> str:
@@ -85,3 +124,6 @@ def set_environment(root: Path) -> None:
     os.environ["RLLM_HOME"] = str(root / ".rllm")
     os.environ.setdefault("WANDB_MODE", "disabled")
     os.environ["PYTHONPATH"] = str(root / "src") + os.pathsep + os.environ.get("PYTHONPATH", "")
+    for key in ("NO_PROXY", "no_proxy"):
+        entries = [item for item in os.environ.get(key, "").split(",") if item]
+        os.environ[key] = ",".join(dict.fromkeys([*entries, "127.0.0.1", "localhost"]))

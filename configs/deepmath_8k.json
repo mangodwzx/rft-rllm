@@ -1,0 +1,13 @@
+{
+  "extends": "baseline.json",
+  "experiment": {"name": "qwen3_1p7b_base_deepmath8k"},
+  "data": {
+    "name": "deepmath8k",
+    "kind": "deepmath",
+    "source": "zwhe99/DeepMath-103K",
+    "source_revision": "main",
+    "registry_name": "rft_deepmath8k",
+    "train_size": 8192,
+    "math_data_name": "math"
+  }
+}

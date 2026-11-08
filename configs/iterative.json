@@ -1,5 +1,5 @@
 {
   "extends": "baseline.json",
-  "experiment": {"name": "qwen3_1p7b_iterative3"},
+  "experiment": {"name": "qwen3_1p7b_base_iterative3"},
   "rft": {"rounds": 3}
 }

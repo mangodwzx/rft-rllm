@@ -4,7 +4,9 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import os
+import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -17,6 +19,7 @@ from pathlib import Path
 
 from . import RLLM_COMMIT, VERL_VERSION
 from .config import write_json
+from .prompts import RAW_CHAT_TEMPLATE, PROMPT_VERSION, prompt_fingerprint
 
 
 def check_installation() -> None:
@@ -70,6 +73,8 @@ def server_command(config: dict, model: str) -> list[str]:
         "--gpu-memory-utilization", str(config["resources"]["gpu_memory_utilization"]),
         "--max-model-len", str(config["sampling"]["max_tokens"] + config["sampling"]["max_prompt_length"]),
         "--generation-config", "vllm",
+        "--chat-template", RAW_CHAT_TEMPLATE,
+        "--chat-template-content-format", "string",
     ]
 
 
@@ -113,15 +118,48 @@ def serving(runner: Runner, config: dict, model: str, label: str):
                 process.wait(timeout=30)
 
 
-def freeze_model(config: dict, destination: Path, root: Path) -> str:
-    from huggingface_hub import HfApi, snapshot_download
+def prepare_base_checkpoint(source: Path, target: Path) -> Path:
+    """Keep source weights immutable; write the identity transport template locally.
+
+    We use the chat endpoint only as a transport through rLLM's trace gateway.
+    This template emits the raw user prompt verbatim, without chat boundaries.
+    """
     from transformers import AutoTokenizer
 
+    require_hf_weights(source)
+    if target.exists():
+        raise FileExistsError(f"Unrecorded prepared checkpoint exists at {target}; inspect or archive it first")
+    target.mkdir(parents=True)
+    for item in source.iterdir():
+        if item.name.startswith("."):
+            continue
+        destination = target / item.name
+        if item.is_file():
+            if item.suffix in {".safetensors", ".bin", ".pt", ".gguf"}:
+                destination.symlink_to(item.resolve())
+            else:
+                shutil.copy2(item, destination)
+        elif item.is_dir():
+            shutil.copytree(item, destination, symlinks=True)
+    tokenizer = AutoTokenizer.from_pretrained(str(source))
+    tokenizer.chat_template = RAW_CHAT_TEMPLATE
+    tokenizer.save_pretrained(str(target))
+    # Tokenizer/processor versions can load the separate template in preference
+    # to tokenizer_config.json. Keep both representations consistent.
+    (target / "chat_template.jinja").write_text(RAW_CHAT_TEMPLATE, encoding="utf-8")
+    return target
+
+
+def freeze_model(config: dict, destination: Path, root: Path) -> str:
+    from huggingface_hub import HfApi, snapshot_download
     if destination.exists():
         info = json.loads(destination.read_text(encoding="utf-8"))
         model_path = Path(info["path"])
         if not model_path.is_dir():
             raise FileNotFoundError(f"Frozen initial model no longer exists: {model_path}")
+        if info.get("prompt_sha256") != prompt_fingerprint():
+            raise ValueError("Frozen model uses a different prompt protocol; choose a new experiment.name")
+        require_hf_weights(model_path)
         return str(model_path)
     spec = config["model"]
     if spec.get("local_path"):
@@ -130,12 +168,14 @@ def freeze_model(config: dict, destination: Path, root: Path) -> str:
             raise FileNotFoundError(model_path)
         info = {"source": "local", "path": str(model_path), "note": "Keep this local checkpoint immutable."}
     else:
-        revision = HfApi().model_info(spec["repo_id"], revision=spec.get("revision") or "main").sha
-        model_path = Path(snapshot_download(spec["repo_id"], revision=revision)).resolve()
+        requested = spec.get("revision") or "main"
+        revision = requested if re.fullmatch(r"[0-9a-f]{40}", requested) else HfApi().model_info(spec["repo_id"], revision=requested).sha
+        model_path = Path(snapshot_download(spec["repo_id"], revision=revision, cache_dir=spec.get("cache_dir"))).resolve()
         info = {"source": "huggingface", "repo_id": spec["repo_id"], "revision": revision, "path": str(model_path)}
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
-    if not tokenizer.chat_template:
-        raise ValueError("The official chat workflow requires a tokenizer chat_template. Choose a chat model or supply a prepared common checkpoint.")
+    source = model_path
+    model_path = prepare_base_checkpoint(source, destination.parent / "initial_model")
+    info.update({"source_path": str(source), "path": str(model_path), "prompt_version": PROMPT_VERSION,
+                 "prompt_sha256": prompt_fingerprint(), "transport": "chat endpoint with identity raw-prompt template"})
     write_json(destination, info)
     return str(model_path)
 
@@ -153,3 +193,17 @@ def require_hf_weights(path: Path) -> None:
         list(path.glob("*.safetensors")) or list(path.glob("pytorch_model*.bin"))
     ):
         raise FileNotFoundError(f"No exported Hugging Face weights in {path}")
+
+
+def finalize_raw_export(path: Path) -> None:
+    """Persist the common transport template in an owned exported checkpoint."""
+    from transformers import AutoTokenizer
+
+    require_hf_weights(path)
+    tokenizer = AutoTokenizer.from_pretrained(str(path))
+    if tokenizer.chat_template != RAW_CHAT_TEMPLATE:
+        tokenizer.chat_template = RAW_CHAT_TEMPLATE
+        tokenizer.save_pretrained(str(path))
+    template = path / "chat_template.jinja"
+    if not template.is_file() or template.read_text(encoding="utf-8") != RAW_CHAT_TEMPLATE:
+        template.write_text(RAW_CHAT_TEMPLATE, encoding="utf-8")

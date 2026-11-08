@@ -10,14 +10,16 @@ from pathlib import Path
 
 from . import RLLM_COMMIT, VERL_VERSION
 from .config import digest, write_json
-from .metrics import compare_runs, summarize_run
-from .runtime import Runner, freeze_model, latest_checkpoint, require_hf_weights, serving
+from .data import data_directory, load_rows, registry_name
+from .metrics import compare_runs, compare_summaries, summarize_run
+from .prompts import PROMPT_VERSION, prompt_fingerprint
+from .runtime import Runner, finalize_raw_export, freeze_model, latest_checkpoint, require_hf_weights, serving
 
 
 def eval_command(config: dict, split: str, attempts: int, output: Path, endpoint: str) -> list[str]:
     sample = config["sampling"]
     return [
-        "rllm", "eval", config["data"]["registry_name"], "--split", split,
+        "rllm", "eval", registry_name(config, split), "--split", split,
         "--agent", "rft_rllm.flow:math_flow", "--evaluator", "rft_rllm.flow:math_evaluator",
         "--model", "rft-model", "--base-url", endpoint, "--attempts", str(attempts),
         "--concurrency", str(config["evaluation"]["concurrency"]),
@@ -32,13 +34,12 @@ def select_command(collection: Path, name: str) -> list[str]:
             "--filter", "solved", "--select", "correct", "--no-dedup", "--split", "train"]
 
 
-def sft_command(config: dict, name: str, model: str, output: Path) -> list[str]:
-    sft = config["rft"]["sft"]
+def sft_command(config: dict, name: str, model: str, output: Path, config_path: Path | None = None) -> list[str]:
+    if config_path is None:
+        config_path = output.parents[2] / "config.json"
     return [
-        "rllm", "sft", name, "--model", model, "--backend", "verl", "--gpus", str(config["resources"]["gpus"]),
-        "--lora-rank", "0", "--lr", str(sft["lr"]), "--batch-size", str(sft["batch_size"]),
-        "--epochs", str(sft["epochs"]), "--max-length", str(sft["max_length"]),
-        "--tokenize-method", "cumulative", "--lr-schedule", "constant", "--output", str(output),
+        sys.executable, "-m", "rft_rllm.train_sft", "--config", str(config_path),
+        "--dataset", name, "--model", model, "--output", str(output),
     ]
 
 
@@ -59,7 +60,9 @@ class Pipeline:
         self.output.mkdir(parents=True, exist_ok=True)
         self.state_path = self.output / "state.json"
         source_hash = hashlib.sha256()
-        for path in sorted((root / "src" / "rft_rllm").glob("*.py")):
+        for path in sorted(Path(__file__).parent.iterdir()):
+            if path.suffix not in {".py", ".json"}:
+                continue
             source_hash.update(path.name.encode() + path.read_bytes())
         self.identity = {"config_sha256": digest(config), "source_sha256": source_hash.hexdigest(), "rllm_commit": RLLM_COMMIT}
         if self.state_path.exists():
@@ -103,19 +106,30 @@ class Pipeline:
 
     def evaluate_model(self, model: str, name: str, split: str, attempts: int, output: Path) -> dict:
         ks = [1, attempts] if split == "train" else self.config["evaluation"]["ks"]
+        rows = load_rows(self.config, self.root, split)
         if name in self.state["completed"]:
-            return summarize_run(output, ks, attempts, self.counts[split])
+            return summarize_run(output, ks, attempts, self.counts[split], task_rows=rows)
         fresh_directory(output)
         with serving(self.runner, self.config, model, f"{name}_server") as endpoint:
             self.runner.run(eval_command(self.config, split, attempts, output, endpoint), name)
-        summary = summarize_run(output, ks, attempts, self.counts[split])
+        summary = summarize_run(output, ks, attempts, self.counts[split], task_rows=rows)
         write_json(output / "summary.json", summary)
-        write_json(output / "protocol.json", {"identity": self.identity, "data_sha256": self.state["data_sha256"], "model_path": model, "split": split})
+        write_json(output / "protocol.json", {
+            "identity": self.identity, "data_sha256": self.state["data_sha256"], "model_path": model,
+            "split": split, "registry_name": registry_name(self.config, split),
+            "prompt_version": PROMPT_VERSION, "prompt_sha256": prompt_fingerprint(),
+            "task_ids": [row["id"] for row in rows],
+        })
         self.done(name, output=str(output))
         return summary
 
     def base(self) -> None:
         self.evaluate_model(self.initial_model(), "base_eval", "test", self.config["evaluation"]["attempts"], self.output / "base_eval")
+
+    def debug(self) -> None:
+        if self.config["data"].get("kind") != "gsm8k":
+            raise ValueError("Use configs/gsm8k_debug.json for the generation/grading debug stage")
+        self.evaluate_model(self.initial_model(), "debug_eval", "debug", self.config["evaluation"]["attempts"], self.output / "debug_eval")
 
     def rft(self) -> None:
         from rllm.data import DatasetRegistry
@@ -140,7 +154,7 @@ class Pipeline:
             training = directory / "train"
             if name + "_sft" not in self.state["completed"]:
                 fresh_directory(training)
-                self.runner.run(sft_command(self.config, curated_name, model, training), name + "_sft")
+                self.runner.run(sft_command(self.config, curated_name, model, training, self.output / "config.json"), name + "_sft")
                 checkpoint = latest_checkpoint(training, actor=False)
                 self.done(name + "_sft", checkpoint=str(checkpoint), input_model=model, accepted_rows=len(curated),
                           generated_responses=stats["total"], observed_generated_tokens=stats["observed_response_tokens"],
@@ -150,7 +164,7 @@ class Pipeline:
             if name + "_export" not in self.state["completed"]:
                 fresh_directory(exported)
                 self.runner.run(merger_command(checkpoint, exported), name + "_export")
-                require_hf_weights(exported)
+                finalize_raw_export(exported)
                 self.done(name + "_export", path=str(exported))
             require_hf_weights(exported)
             model = str(exported)
@@ -176,6 +190,7 @@ class Pipeline:
                 require_hf_weights(exported)
                 self.done("grpo_export", path=str(exported))
         require_hf_weights(exported)
+        finalize_raw_export(exported)
         self.state["models"]["grpo"] = str(exported)
         self.save()
 
@@ -188,7 +203,15 @@ class Pipeline:
 
     def report(self) -> None:
         from .budget import collect_budgets
+        from .data import prepare
 
+        # Validate the frozen files even for report-only runs (no GPU imports).
+        if not (data_directory(self.config, self.root) / "manifest.json").is_file():
+            raise FileNotFoundError("Prepared data manifest is missing; report never downloads or reconstructs data")
+        manifest = prepare(self.config, self.root, register=False)
+        if digest(manifest) != self.state.get("data_sha256"):
+            raise ValueError("Prepared data no longer matches the evaluated run")
+        rows = load_rows(self.config, self.root, "test")
         count = self.state["completed"]["prepare"]["counts"]["test"]
         paths = {name: self.output / f"{name}_eval" for name in ("base", "rft", "grpo")}
         for name, path in paths.items():
@@ -197,30 +220,48 @@ class Pipeline:
             protocol = json.loads((path / "protocol.json").read_text(encoding="utf-8"))
             if protocol["identity"] != self.identity or protocol["data_sha256"] != self.state["data_sha256"] or protocol["split"] != "test":
                 raise ValueError(f"Evaluation protocol mismatch: {path}")
-        summaries = compare_runs(paths, self.config["evaluation"]["ks"], self.config["evaluation"]["attempts"], count)
+            if protocol.get("task_ids") != [row["id"] for row in rows] or protocol.get("prompt_sha256") != prompt_fingerprint():
+                raise ValueError(f"Evaluation task identity or prompt mismatch: {path}")
+        summaries = compare_runs(paths, self.config["evaluation"]["ks"], self.config["evaluation"]["attempts"], count, task_rows=rows)
         for name, summary in summaries.items():
             summary["checkpoint"] = self.state["models"][name]
         budget = collect_budgets(self.output, self.state, self.config)
         write_json(self.output / "budget.json", budget)
-        write_json(self.output / "summary.json", {"groups": summaries, "training_budget": budget,
+        comparisons = compare_summaries(summaries)
+        write_json(self.output / "comparison.json", comparisons)
+        from .reporting import write_comparison_artifacts
+
+        write_comparison_artifacts(self.output, summaries, comparisons)
+        write_json(self.output / "summary.json", {"groups": summaries, "comparisons": comparisons, "training_budget": budget,
                    "note": "Offline/iterative RFT versus online GRPO; generation and optimizer budgets are not equal."})
-        columns = ["group", "checkpoint", "tasks", "attempts", "accuracy", "mean_response_tokens", "mean_correct_response_tokens", "truncation_rate", "errors"]
+        columns = ["group", "subset", "checkpoint", "tasks", "attempts", "accuracy", "mean_response_tokens", "mean_correct_response_tokens", "truncation_rate", "errors"]
         columns += [f"pass@{k}" for k in self.config["evaluation"]["ks"]]
         with (self.output / "summary.csv").open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=columns)
             writer.writeheader()
             for name, info in summaries.items():
-                row = {key: info[key] for key in columns if key in info}
-                row.update({"group": name, **{f"pass@{k}": value for k, value in info["pass_at"].items()}})
-                writer.writerow(row)
+                subsets = {"all": info, "level_4_5": info["subsets"]["level_4_5"]}
+                subsets.update({f"level_{key}": value for key, value in info["subsets"]["by_level"].items()})
+                subsets.update({f"subject_{key}": value for key, value in info["subsets"]["by_subject"].items()})
+                for subset, metrics in subsets.items():
+                    row = {key: metrics[key] for key in columns if key in metrics}
+                    row.update({"group": name, "subset": subset, "checkpoint": info["checkpoint"],
+                                **{f"pass@{k}": value for k, value in (metrics["pass_at"] or {}).items()}})
+                    writer.writerow(row)
         print(f"Saved {self.output / 'summary.csv'}")
 
     def run(self, stage: str) -> None:
+        debug_only = self.config["data"].get("kind") == "gsm8k"
+        if debug_only and stage not in {"all", "prepare", "debug"}:
+            raise ValueError("GSM8K is for generation/grading only; use stage debug or prepare")
         if stage == "report":
             self.report()
             return
         self.prepare()
         if stage == "prepare":
+            return
+        if debug_only:
+            self.debug()
             return
         if stage == "all":
             self.base()
