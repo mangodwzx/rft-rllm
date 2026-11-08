@@ -1,0 +1,5 @@
+{
+  "extends": "baseline.json",
+  "experiment": {"name": "qwen3_1p7b_formal_eval"},
+  "evaluation": {"attempts": 1024, "ks": [1, 2, 4, 8, 16, 32, 64, 128, 256], "concurrency": 64}
+}

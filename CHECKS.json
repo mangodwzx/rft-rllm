@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "files": [
+    "src\\rft_rllm\\__init__.py",
+    "src\\rft_rllm\\__main__.py",
+    "src\\rft_rllm\\budget.py",
+    "src\\rft_rllm\\cli.py",
+    "src\\rft_rllm\\config.py",
+    "src\\rft_rllm\\data.py",
+    "src\\rft_rllm\\flow.py",
+    "src\\rft_rllm\\metrics.py",
+    "src\\rft_rllm\\pipeline.py",
+    "src\\rft_rllm\\runtime.py",
+    "src\\rft_rllm\\train_grpo.py",
+    "scripts\\check_light.py",
+    "configs\\baseline.json",
+    "configs\\formal.json",
+    "configs\\iterative.json"
+  ],
+  "checks": [
+    "AST",
+    "TOML/JSON",
+    "three CLI plans",
+    "tiny pass@k/incomplete-grid smoke"
+  ],
+  "not_run": [
+    "GPU dependencies",
+    "model/data downloads",
+    "inference",
+    "training"
+  ]
+}
