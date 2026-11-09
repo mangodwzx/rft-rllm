@@ -1,0 +1,27 @@
+{
+  "extends": "baseline.json",
+  "experiment": {"name": "qwen3_1p7b_base_training_smoke"},
+  "data": {
+    "name": "math_training_smoke",
+    "registry_name": "rft_math_training_smoke",
+    "train_size": 64,
+    "pilot_size": 64,
+    "dev_size": 256
+  },
+  "sampling": {"max_prompt_length": 2048, "max_tokens": 1024},
+  "resources": {"gpus": 1, "tensor_parallel_size": 1, "gpu_memory_utilization": 0.5},
+  "rft": {
+    "rounds": 1,
+    "attempts": 8,
+    "sft": {"epochs": 1, "batch_size": 4, "max_steps": 2, "max_length": 3073}
+  },
+  "grpo": {
+    "batch_size": 4,
+    "group_size": 4,
+    "epochs": 1,
+    "max_steps": 2,
+    "save_freq": 2,
+    "val_freq": -1
+  },
+  "evaluation": {"attempts": 2, "ks": [1, 2], "concurrency": 8}
+}

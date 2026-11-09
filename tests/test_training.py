@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from rft_rllm.config import validate
 from rft_rllm.prompts import RAW_CHAT_TEMPLATE, raw_messages, render_prompt
 from rft_rllm.raw_sft_dataset import tokenize_raw_messages
 from rft_rllm.train_grpo import build_overrides
@@ -79,6 +80,8 @@ class RawTrainingTests(unittest.TestCase):
     def test_sft_dispatches_official_trainer_with_custom_data_and_no_validation(self):
         captured = {}
         settings = self.settings()
+        settings["rft"]["sft"]["max_steps"] = 2
+        settings["rft"]["sft"]["max_ckpt_to_keep"] = 2
         modules = {name: ModuleType(name) for name in (
             "rllm", "rllm.data", "rllm.trainer", "rllm.trainer.agent_sft_trainer", "rllm.trainer.sft", "transformers",
         )}
@@ -105,6 +108,44 @@ class RawTrainingTests(unittest.TestCase):
         self.assertIsNone(captured["spec"].val_dataset)
         self.assertEqual(captured["spec"].overrides["data"]["custom_cls"]["name"], "RawCompletionSFTDataset")
         self.assertEqual(captured["spec"].lora_rank, 0)
+        self.assertEqual(captured["spec"].overrides["trainer"]["total_training_steps"], 1)
+        self.assertEqual(captured["spec"].overrides["trainer"]["max_ckpt_to_keep"], 2)
+
+    def test_sft_checkpoint_retention_is_optional_and_requires_a_positive_integer(self):
+        settings = self.settings()
+        settings["rft"]["sft"].pop("max_ckpt_to_keep", None)
+        validate(settings)
+        self.assertNotIn("max_ckpt_to_keep", sft_overrides(settings)["trainer"])
+        settings["rft"]["sft"]["max_ckpt_to_keep"] = None
+        validate(settings)
+        self.assertNotIn("max_ckpt_to_keep", sft_overrides(settings)["trainer"])
+        for keep in (1, 2):
+            with self.subTest(keep=keep):
+                settings["rft"]["sft"]["max_ckpt_to_keep"] = keep
+                validate(settings)
+                self.assertEqual(sft_overrides(settings)["trainer"]["max_ckpt_to_keep"], keep)
+        for keep in (0, -1, True, 1.5, "2"):
+            with self.subTest(keep=keep):
+                settings["rft"]["sft"]["max_ckpt_to_keep"] = keep
+                with self.assertRaisesRegex(ValueError, "rft.sft.max_ckpt_to_keep must be a positive integer"):
+                    validate(settings)
+
+    def test_sft_optional_step_cap_keeps_default_epoch_training(self):
+        settings = self.settings()
+        for train_count in (None, 64):
+            with self.subTest(train_count=train_count):
+                self.assertNotIn("total_training_steps", sft_overrides(settings, train_count)["trainer"])
+
+    def test_sft_step_cap_accounts_for_full_batches_and_epochs(self):
+        settings = self.settings()
+        settings["rft"]["sft"].update(batch_size=4, epochs=1, max_steps=2)
+        for train_count, epochs, expected_steps in ((64, 1, 2), (8, 1, 2), (7, 1, 1), (4, 1, 1), (7, 2, 2)):
+            with self.subTest(train_count=train_count, epochs=epochs):
+                settings["rft"]["sft"]["epochs"] = epochs
+                overrides = sft_overrides(settings, train_count)
+                self.assertEqual(overrides["trainer"]["total_training_steps"], expected_steps)
+        with self.assertRaisesRegex(ValueError, "at least one full training batch"):
+            sft_overrides(settings, train_count=3)
 
 
 def original_builder_for_guard(accumulated, pad_token_id, max_prompt_length, max_response_length, processor=None):

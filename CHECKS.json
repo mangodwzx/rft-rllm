@@ -30,9 +30,10 @@
     "configs/formal.json",
     "configs/gsm8k_debug.json",
     "configs/high_precision.json",
-    "configs/iterative.json"
+    "configs/iterative.json",
+    "configs/training_smoke.json"
   ],
-  "tests_run": 51,
+  "tests_run": 55,
   "checks": [
     "AST",
     "TOML/JSON",
@@ -41,14 +42,12 @@
     "CPU regression suite"
   ],
   "not_run": [
-    "Pinned GPU stack end-to-end integration",
-    "GPU model inference",
-    "SFT or GRPO training",
+    "Pilot/full model training",
+    "MATH-500 pass@256 evaluation",
     "Actual DeepMath download/preparation",
     "Qwen3.5 checkpoint inference/training"
   ],
-  "tests_skipped": 4,
-  "tests_skipped_reason": "Four tensor checks require torch, which is absent from the minimal Python interpreter; all four were subsequently included in the successful CPU torch training suite.",
+  "tests_skipped": 0,
   "additional_training_suite": {
     "tests_run": 11,
     "tests_skipped": 0,
@@ -102,7 +101,8 @@
     "static_checks": [
       "ruff E9/F",
       "bash -n scripts/setup_linux.sh",
-      "git diff --check"
+      "git diff --check",
+      "bash -n scripts/prepare_cuda.sh scripts/setup_linux.sh"
     ],
     "eos_logprob_gradient": {
       "status": "passed",
@@ -120,6 +120,213 @@
         22,
         0
       ]
+    },
+    "project_environment_installation": {
+      "status": "passed",
+      "versions": {
+        "torch": "2.11.0+cu130",
+        "flash-attn": "2.8.3",
+        "vllm": "0.22.1",
+        "verl": "0.8.0",
+        "rllm": "0.3.0rc0",
+        "rft-rllm-baselines": "0.1.0",
+        "numpy": "2.3.5"
+      },
+      "cuda_available": true,
+      "extension": "/mnt/public2/wangzixu/repos/rft-rllm/.venv/lib/python3.11/site-packages/flash_attn_2_cuda.cpython-311-x86_64-linux-gnu.so",
+      "checks": [
+        "torch import",
+        "flash_attn CUDA extension import",
+        "flash_attn package import",
+        "rllm/verl/vllm package imports"
+      ],
+      "not_run": [
+        "Full GPU engine integration",
+        "model inference",
+        "training"
+      ],
+      "flash_attention_gpu_smoke": {
+        "status": "passed",
+        "gpu": "NVIDIA A800-SXM4-80GB",
+        "physical_gpu_index": 2,
+        "dtype": "float16",
+        "shape": [
+          1,
+          32,
+          2,
+          32
+        ],
+        "forward_max_abs_error": 0.000675201416015625,
+        "qkv_gradient_max_abs_errors": [
+          1.266365870833397e-06,
+          1.80024653673172e-06,
+          1.964624971151352e-06
+        ],
+        "reference": "CPU float32 scaled dot product attention",
+        "scope": "Tiny FlashAttention forward/backward only; no model inference or training"
+      },
+      "pip_check": {
+        "status": "known_upstream_override",
+        "conflict": "verl 0.8.0 declares numpy<2, but installed numpy is 2.3.5; pinned rLLM explicitly overrides NumPy requirements. vLLM/OpenCV requires NumPy >=2.",
+        "other_conflicts": 0
+      },
+      "scope": "Project .venv; linker repair, package imports, 51 CPU tests and tiny GPU extension check only. Full experiments not run."
+    },
+    "gsm8k_local_inference": {
+      "status": "passed",
+      "run": "runs/qwen3_1p7b_base_gsm8k_debug_local",
+      "tasks": 32,
+      "attempts": 8,
+      "total": 256,
+      "correct": 106,
+      "errors": 0,
+      "pass_at_1": 0.4140625,
+      "pass_at_8": 0.96875,
+      "truncated": 2,
+      "scope": "Generation and grading only, before response-role fix; no model training. Some answers continue into later questions and affect last-boxed grading."
+    },
+    "response_role_fix": {
+      "status": "passed_cpu",
+      "add_generation_prompt": true,
+      "real_tokenizer_tasks_checked": 32,
+      "raw_prompt_ids_unchanged": true,
+      "installed_vllm_role_function": {
+        "false": "user",
+        "true": "assistant"
+      },
+      "scope": "Shared identity template ignores the flag. Request/trace/SFT regression passed; corrected flow has not yet been run with the GPU server."
+    },
+    "training_smoke_config": {
+      "status": "passed_cpu",
+      "config": "configs/training_smoke.json",
+      "train_tasks": 64,
+      "sft_max_steps": 2,
+      "grpo_max_steps": 2,
+      "checks": [
+        "official SFT config composition",
+        "official GRPO config composition",
+        "validation disabled",
+        "checkpoint step settings"
+      ],
+      "scope": "Configuration and CPU regression only; no training launched."
+    },
+    "rft_training_smoke": {
+      "status": "passed",
+      "run": "runs/qwen3_1p7b_base_training_smoke",
+      "train_tasks": 64,
+      "rollouts": 512,
+      "accepted": 127,
+      "sft_steps": 2,
+      "train_losses": [
+        0.3263186514377594,
+        0.24361200630664825
+      ],
+      "hf_export": "runs/qwen3_1p7b_base_training_smoke/rft/round_01/hf",
+      "scope": "Actual Qwen3-1.7B-Base GPU sampling, curation, SFT and checkpoint export; smoke only."
+    },
+    "grpo_gateway_proxy_fix": {
+      "status": "passed_cpu",
+      "failure": "LAN HTTP requests used the download proxy; local gateway health check timed out before training",
+      "fix": "scripts/env.sh merges both NO_PROXY variants and adds hostname and all local interface IPs before Ray startup",
+      "checks": [
+        "LAN HTTP parent and child processes return 200 with proxy environment retained",
+        "Actual pinned GatewayManager process healthy in 2.144 seconds and stopped cleanly",
+        "Gateway subprocess inherits matching NO_PROXY/no_proxy containing the node IP"
+      ],
+      "scope": "Gateway startup and subsequent actual two-step GRPO retry passed; failed startup outputs preserved."
+    },
+    "grpo_training_smoke": {
+      "status": "passed",
+      "run": "runs/qwen3_1p7b_base_training_smoke",
+      "trainer_steps": 2,
+      "checkpoint": "grpo/train/global_step_2/actor",
+      "hf_export": "grpo/train/global_step_2/actor/huggingface",
+      "scope": "Actual Qwen3-1.7B-Base GRPO updates and checkpoint export after proxy fix; exported-model evaluation and report still pending.",
+      "rollouts_per_step": 16,
+      "rollout_errors": 0,
+      "first_step_zero_advantages": true,
+      "second_step_correct_rollouts": 1,
+      "second_step_grad_norm": 2.91185,
+      "sampled_weights_changed": true,
+      "exported_tensor_counts": {
+        "base": 310,
+        "rft": 310,
+        "grpo": 310
+      },
+      "exported_tensor_dtypes": {
+        "base": "BF16",
+        "rft": "BF16",
+        "grpo": "F32"
+      },
+      "tokenizer_local_load_and_raw_template_check": "passed for all three models"
+    },
+    "exported_checkpoint_evaluation_and_report": {
+      "status": "passed",
+      "run": "runs/qwen3_1p7b_base_training_smoke",
+      "groups": {
+        "base": {
+          "tasks": 500,
+          "attempts": 2,
+          "total": 1000,
+          "errors": 0,
+          "pass_at": {
+            "1": 0.18,
+            "2": 0.294
+          },
+          "truncation_rate": 0.074
+        },
+        "rft": {
+          "tasks": 500,
+          "attempts": 2,
+          "total": 1000,
+          "errors": 0,
+          "pass_at": {
+            "1": 0.18,
+            "2": 0.296
+          },
+          "truncation_rate": 0.059
+        },
+        "grpo": {
+          "tasks": 500,
+          "attempts": 2,
+          "total": 1000,
+          "errors": 0,
+          "pass_at": {
+            "1": 0.169,
+            "2": 0.272
+          },
+          "truncation_rate": 0.075
+        }
+      },
+      "protocol": "raw_math_fewshot_v1",
+      "scope": "Two-step smoke only; three exported models loaded by independent vLLM servers, graded and reported."
+    },
+    "v2_stop_protocol": {
+      "status": "passed",
+      "cpu_checks": "environment/stop-v2-cpu-checks.json",
+      "gpu_run": "runs/qwen3_1p7b_base_gsm8k_stop_v2",
+      "protocol": "raw_math_fewshot_v2",
+      "stop_strings": [
+        "\nProblem:"
+      ],
+      "total": 256,
+      "errors": 0,
+      "truncation_rate": 0.0,
+      "nonempty_answers": 256,
+      "assistant_steps": 256,
+      "answers_with_next_problem_boundary": 0,
+      "scope": "Actual GPU generation and grading; GRPO stop token alignment inspected with installed source/CPU checks, pilot training pending."
+    },
+    "pilot_v2_preparation": {
+      "status": "passed",
+      "run": "runs/qwen3_1p7b_base_pilot_v2",
+      "train": 2048,
+      "dev": 256,
+      "test": 500,
+      "dev_test_hashes_match_smoke": true,
+      "planned_grpo_steps": 64,
+      "sft_max_ckpt_to_keep": 2,
+      "training_started": false
     }
   }
 }

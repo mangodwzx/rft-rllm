@@ -20,7 +20,7 @@
   "rft": {
     "rounds": 1,
     "attempts": 8,
-    "sft": {"epochs": 1, "lr": 0.000001, "batch_size": 32, "max_length": 8193, "lora_rank": 0}
+    "sft": {"epochs": 1, "lr": 0.000001, "batch_size": 32, "max_length": 8193, "lora_rank": 0, "max_ckpt_to_keep": 2}
   },
   "grpo": {"batch_size": 32, "group_size": 8, "epochs": 1, "lr": 0.000001, "seed": 42, "overrides": []},
   "evaluation": {"attempts": 256, "ks": [1, 2, 4, 8, 16, 32, 64, 128, 256], "concurrency": 32}

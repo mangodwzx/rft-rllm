@@ -125,6 +125,14 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len([row for row in csv_rows if row["subset"] == "level_4_5"]), 3)
             self.assertTrue((pipeline.output / "pass_at_k.svg").is_file())
             self.assertTrue((pipeline.output / "comparison.csv").is_file())
+            # Results generated with another stopping rule cannot silently
+            # enter a report even when their prompts and task IDs still match.
+            protocol_path = pipeline.output / "grpo_eval" / "protocol.json"
+            protocol = json.loads(protocol_path.read_text())
+            protocol["stop_strings"] = []
+            protocol_path.write_text(json.dumps(protocol))
+            with self.assertRaisesRegex(ValueError, "generation protocol mismatch"):
+                pipeline.report()
 
     def test_cli_models_needs_no_model_or_data_download(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:

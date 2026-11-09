@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 
-PROMPT_VERSION = "raw_math_fewshot_v1"
+PROMPT_VERSION = "raw_math_fewshot_v2"
 DEMONSTRATIONS = (
     ("Solve 3x + 7 = 22 for x.", r"Subtracting 7 gives 3x = 15. Dividing by 3 gives x = 5. The final answer is \boxed{5}."),
     ("A rectangle has side lengths 4 and 9. What is its area?", r"Its area is the product of its side lengths: 4 \times 9 = 36. The final answer is \boxed{36}."),
@@ -16,7 +16,10 @@ DEMONSTRATIONS = (
 )
 INSTRUCTION = r"Solve the following mathematics problem. Show your reasoning, and put your final answer in \boxed{...}."
 RAW_CHAT_TEMPLATE = "{{ messages[0]['content'] }}"
-STOP_STRINGS: list[str] = []
+# End a completion before it starts another few-shot problem. This also
+# matches the final newline in "\n\nProblem:"; do not stop at a boxed answer,
+# since a solution can legitimately revise intermediate calculations.
+STOP_STRINGS: list[str] = ["\nProblem:"]
 
 
 def render_prompt(problem: str) -> str:

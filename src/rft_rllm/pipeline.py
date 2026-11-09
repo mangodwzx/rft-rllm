@@ -12,7 +12,7 @@ from . import RLLM_COMMIT, VERL_VERSION
 from .config import digest, write_json
 from .data import data_directory, load_rows, registry_name
 from .metrics import compare_runs, compare_summaries, summarize_run
-from .prompts import PROMPT_VERSION, prompt_fingerprint
+from .prompts import PROMPT_VERSION, STOP_STRINGS, prompt_fingerprint
 from .runtime import Runner, finalize_raw_export, freeze_model, latest_checkpoint, require_hf_weights, serving
 
 
@@ -118,6 +118,7 @@ class Pipeline:
             "identity": self.identity, "data_sha256": self.state["data_sha256"], "model_path": model,
             "split": split, "registry_name": registry_name(self.config, split),
             "prompt_version": PROMPT_VERSION, "prompt_sha256": prompt_fingerprint(),
+            "stop_strings": STOP_STRINGS,
             "task_ids": [row["id"] for row in rows],
         })
         self.done(name, output=str(output))
@@ -222,6 +223,8 @@ class Pipeline:
                 raise ValueError(f"Evaluation protocol mismatch: {path}")
             if protocol.get("task_ids") != [row["id"] for row in rows] or protocol.get("prompt_sha256") != prompt_fingerprint():
                 raise ValueError(f"Evaluation task identity or prompt mismatch: {path}")
+            if protocol.get("prompt_version") != PROMPT_VERSION or protocol.get("stop_strings") != STOP_STRINGS:
+                raise ValueError(f"Evaluation generation protocol mismatch: {path}")
         summaries = compare_runs(paths, self.config["evaluation"]["ks"], self.config["evaluation"]["attempts"], count, task_rows=rows)
         for name, summary in summaries.items():
             summary["checkpoint"] = self.state["models"][name]

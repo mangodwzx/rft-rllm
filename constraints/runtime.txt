@@ -1,0 +1,4 @@
+# Keep pinned rLLM's explicit NumPy override: vLLM's OpenCV needs NumPy >= 2,
+# while verl 0.8.0 declares < 2. This upstream metadata conflict remains.
+# On Python 3.11, mistral-common additionally requires NumPy < 2.4.
+numpy==2.3.5

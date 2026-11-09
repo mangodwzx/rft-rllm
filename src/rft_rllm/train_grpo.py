@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .prompts import RAW_CHAT_TEMPLATE
+from .prompts import RAW_CHAT_TEMPLATE, STOP_STRINGS
 
 
 def _override(key: str, value: Any) -> str:
@@ -122,6 +122,10 @@ def build_config(settings: dict[str, Any], model: str, output: Path, train_count
     # argparse entry point instead of an @hydra.main function.
     sync_config(config, hydra_overrides=overrides)
 
+    for mode in ("train", "val"):
+        params = config.rllm.rollout[mode]
+        if "stop" in params and params.stop != STOP_STRINGS:
+            raise ValueError(f"rllm.rollout.{mode}.stop must match the shared raw-completion stop strings")
     if config.rllm.async_training.enable or config.rllm.rejection_sample.enable:
         raise ValueError("This baseline uses synchronous GRPO without rejection resampling.")
     if config.rllm.algorithm.adv_estimator != "grpo":

@@ -14,6 +14,10 @@
 
 OpenAI chat endpoint 仅作为 rLLM gateway 的传输接口：identity 模板原样输出单条 user 消息中的 raw 提示，不添加 ChatML、角色边界或 assistant 前缀。模型输入不是普通对话模板。提示版本和哈希写入产物；轨迹保留 prompt 与 assistant completion，供筛选和训练使用。
 
+`raw_math_fewshot_v2` 保留原提示文本，统一在生成出现 `\nProblem:` 时停止，防止模型继续编写下一道题并改变“最后一个 boxed”答案。该规则通过共享 flow 的 OpenAI `stop` 参数应用于 Base 评测、RFT 收集、GRPO 训练和验证；不在第一个 boxed 处停止，允许同一道题修正中间结论。每份 `protocol.json` 记录停止字符串，报告拒绝混用不同版本或停止条件。
+
+vLLM 返回的可见文本不含停止标记，但生成至停止边界的 token IDs 和 logprobs 保留原样供 GRPO 使用，不手动裁切或重新编码；RFT 仍对可见回答编码并补 EOS。两种训练对终止 token 的处理因此存在差异。原 v1 smoke 的完整报告及源码快照保留，新 v2 实验使用独立名称，不能把两套停止协议的分数混为同一实验。
+
 判分委托固定版本的官方数学 evaluator。GSM8K 数据准备从 `####` 后提取数值参考答案，模型回答仍通过共享的数学提示和判分流程处理。
 
 默认 temperature=1.0、top_p=1.0，prompt/response 预算分别为 4096 token。SFT 总长度上限为 8193，额外预留 EOS；raw SFT adapter 拒绝超长样本，不静默截断。生成侧的超长请求或运行错误保留在评估结果中。各 attempt 不复用同一请求 seed，固定服务/训练 seed 也不保证并发 GPU 采样逐位一致。
@@ -67,6 +71,6 @@ k=N 时 pass@k 等于观察到的题目覆盖率，不能据此确定能力边�
 
 恢复以完成阶段为单位；中断且非空的阶段目录会要求检查和归档。SFT 分片 checkpoint 经官方 merger 导出后再用于下一轮或评估；GRPO 使用其完整 HF 权重或合并后的导出。`report` 校验已保存数据、任务顺序、提示和评估协议后重新汇总。
 
-当前验证覆盖 CPU 单元测试、配置/CLI 计划、真实缓存的 MATH/GSM8K 规范化和划分，以及合成 DeepMath 的保护集与嵌套规模测试。未执行 GPU 推理、SFT、GRPO 或完整真实 DeepMath 准备；不能将这些检查描述为已复现实验结果或已验证四种模型的 GPU 兼容性。
+当前已完成 Qwen3-1.7B-Base 的真实 GPU 生成、MATH64 上两步 SFT/GRPO、完整权重导出、三组各 500×2 的独立推理、判分和报告检查。v1 smoke 三组均无请求错误，结果用于流程验收，不能据此判断 RFT/GRPO 优劣。CPU 检查覆盖数据规范化、分层划分、合成 DeepMath 的保护集与嵌套规模，以及 v2 停止规则透传和 token 对齐。完整 pilot/full 训练、pass@256 和真实 DeepMath 准备仍待执行；这些检查不代表四个模型均已验证兼容。
 
 上游依据：[rLLM 固定版本](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8)、[官方 curation](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/eval/curation.py)、[SFT backend](https://github.com/rllm-org/rllm/blob/4e828c81680e5a85b638ceedeaf09d1e90109ca8/rllm/trainer/sft/verl_backend.py)、[数学 cookbook](https://github.com/rllm-org/rllm/tree/4e828c81680e5a85b638ceedeaf09d1e90109ca8/cookbooks/math)、[verl SFT loss](https://github.com/volcengine/verl/blob/v0.8.0/verl/workers/utils/losses.py)。

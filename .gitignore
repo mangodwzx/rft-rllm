@@ -6,3 +6,7 @@ runs/
 __pycache__/
 *.egg-info/
 .ruff_cache/
+.runtime/
+ray/
+environment/
+models/

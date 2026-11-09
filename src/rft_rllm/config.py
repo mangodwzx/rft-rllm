@@ -86,6 +86,13 @@ def validate(config: dict) -> None:
     for key in ("epochs", "batch_size", "max_length"):
         if not isinstance(sft[key], int) or sft[key] < 1:
             raise ValueError(f"rft.sft.{key} must be a positive integer")
+    for label, section in (("rft.sft", sft), ("grpo", config["grpo"])):
+        value = section.get("max_steps")
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+            raise ValueError(f"{label}.max_steps must be a positive integer")
+    keep = sft.get("max_ckpt_to_keep")
+    if keep is not None and (not isinstance(keep, int) or isinstance(keep, bool) or keep < 1):
+        raise ValueError("rft.sft.max_ckpt_to_keep must be a positive integer")
     if sft["lora_rank"] != 0:
         raise ValueError("This comparison/export path uses full fine-tuning; set lora_rank=0")
     if sft["max_length"] < config["sampling"]["max_tokens"] + config["sampling"]["max_prompt_length"] + 1:

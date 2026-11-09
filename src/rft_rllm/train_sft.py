@@ -8,8 +8,8 @@ from pathlib import Path
 from .prompts import RAW_CHAT_TEMPLATE
 
 
-def sft_overrides(settings: dict) -> dict:
-    return {
+def sft_overrides(settings: dict, train_count: int | None = None) -> dict:
+    overrides = {
         "model": {"custom_chat_template": RAW_CHAT_TEMPLATE},
         "data": {
             "custom_cls": {"path": "pkg://rft_rllm.raw_sft_dataset", "name": "RawCompletionSFTDataset"},
@@ -18,6 +18,20 @@ def sft_overrides(settings: dict) -> dict:
         },
         "trainer": {"n_gpus_per_node": settings["resources"]["gpus"], "resume_mode": "disable"},
     }
+    sft = settings["rft"]["sft"]
+    if sft.get("max_ckpt_to_keep") is not None:
+        overrides["trainer"]["max_ckpt_to_keep"] = int(sft["max_ckpt_to_keep"])
+    if sft.get("max_steps") is not None:
+        max_steps = int(sft["max_steps"])
+        if train_count is not None:
+            available_steps = train_count // int(sft["batch_size"]) * int(sft["epochs"])
+            # verl saves the final checkpoint at total_training_steps; a cap
+            # beyond the available full batches would miss that final save.
+            max_steps = min(max_steps, available_steps)
+        if max_steps < 1:
+            raise ValueError("SFT step limit requires at least one full training batch and a positive max_steps")
+        overrides["trainer"]["total_training_steps"] = max_steps
+    return overrides
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -50,7 +64,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_size=int(sft["batch_size"]), max_length=int(sft["max_length"]),
         lora_rank=0, tokenize_method="cumulative", val_freq=-1,
         project="rft-rllm", experiment=settings["experiment"]["name"],
-        output_dir=str(output), overrides=sft_overrides(settings),
+        output_dir=str(output), overrides=sft_overrides(settings, train_count=len(dataset)),
     )
     AgentSFTTrainer(spec, backend="verl").train()
 

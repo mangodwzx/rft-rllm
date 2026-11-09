@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from rft_rllm.prompts import DEMONSTRATIONS, INSTRUCTION, raw_messages, render_prompt
+from rft_rllm.raw_sft_dataset import tokenize_raw_messages
 
 
 def load_flow(client, grader):
@@ -68,7 +69,8 @@ class RawFlowTests(unittest.TestCase):
         episode = asyncio.run(flow.math_flow(task, SimpleNamespace(base_url="http://gateway/v1", model="base")))
         self.assertEqual(calls["client"]["max_retries"], 0)
         self.assertEqual(calls["request"]["messages"], raw_messages("1+1?"))
-        self.assertEqual(calls["request"]["extra_body"], {"add_generation_prompt": False, "add_special_tokens": False})
+        self.assertEqual(calls["request"]["stop"], ["\nProblem:"])
+        self.assertEqual(calls["request"]["extra_body"], {"add_generation_prompt": True, "add_special_tokens": False})
         self.assertEqual(episode.artifacts["answer"], "\n reason \\boxed{2}")
         self.assertEqual(episode.metrics["truncated"], 1)
         self.assertEqual(episode.metrics["response_tokens"], 9)
@@ -76,6 +78,49 @@ class RawFlowTests(unittest.TestCase):
         signals = {signal.name: signal.value for signal in result.signals}
         self.assertEqual(signals["task_fingerprint"], float(flow.task_fingerprint("1+1?")))
         self.assertEqual(signals["prompt_tokens"], 250)
+
+    def test_gateway_response_role_produces_trainable_raw_sft_messages(self):
+        trace = {}
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def create(self, **kwargs):
+                # vLLM's get_chat_request_role inherits the last input role
+                # unless add_generation_prompt is true. The rLLM gateway
+                # stores that response role, replacing flow-created Steps.
+                role = "assistant" if kwargs["extra_body"]["add_generation_prompt"] else kwargs["messages"][-1]["role"]
+                message = {"role": role, "content": r"The answer is \boxed{2}."}
+                trace["messages"] = [*kwargs["messages"], message]
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(**message), finish_reason="stop")],
+                    usage=None,
+                )
+
+        class Tokenizer:
+            eos_token_id = 1
+
+            def encode(self, text, add_special_tokens):
+                if add_special_tokens:
+                    raise AssertionError("Raw SFT must not add special tokens")
+                return [ord(char) + 10 for char in text]
+
+        flow = load_flow(Client, None)
+        task = SimpleNamespace(metadata={"question": "1+1?"}, instruction="")
+        asyncio.run(flow.math_flow(task, SimpleNamespace(base_url="http://gateway/v1", model="base")))
+        messages = trace["messages"]
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant"])
+        ids, mask = tokenize_raw_messages(messages, Tokenizer(), 8193)
+        prompt_length = len(render_prompt("1+1?"))
+        self.assertEqual(mask[:prompt_length], [0] * prompt_length)
+        self.assertEqual(mask[prompt_length:], [1] * (len(ids) - prompt_length))
 
     def test_flow_does_not_replace_failed_generation_with_empty_answer(self):
         class Client:

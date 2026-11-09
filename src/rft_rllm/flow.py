@@ -14,7 +14,7 @@ from rllm.eval.types import Signal
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 from .metrics import task_fingerprint
-from .prompts import raw_messages
+from .prompts import STOP_STRINGS, raw_messages
 
 
 @rllm.rollout(name="rft_math")
@@ -27,7 +27,11 @@ async def math_flow(task: Task, config: AgentConfig) -> Episode:
     async with AsyncOpenAI(base_url=config.base_url, api_key="EMPTY", max_retries=0) as client:
         response = await client.chat.completions.create(
             model=config.model, messages=messages, timeout=300,
-            extra_body={"add_generation_prompt": False, "add_special_tokens": False},
+            stop=STOP_STRINGS,
+            # The identity template ignores this flag, so no prompt tokens are
+            # added. vLLM uses it to label the response as assistant; otherwise
+            # it inherits the last user role and gateway traces break raw SFT.
+            extra_body={"add_generation_prompt": True, "add_special_tokens": False},
         )
     choice = response.choices[0]
     answer = choice.message.content or ""
